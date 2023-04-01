@@ -379,6 +379,15 @@
           "Don't compile methods larger than this if "                      \
           "+DontCompileHugeMethods")                                        \
                                                                             \
+  product(bool, StoreSharedCode, false,                                     \
+          "Store compiled code")                                            \
+                                                                            \
+  product(bool, LoadSharedCode, false,                                      \
+          "Load compiled code")                                             \
+                                                                            \
+  product(ccstr, SharedCodeFile, "code.jsa",                                \
+          "File with compiled code")                                        \
+                                                                            \
 
 // end of COMPILER_FLAGS
 

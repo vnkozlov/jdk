@@ -31,6 +31,7 @@
 #include "classfile/symbolTable.hpp"
 #include "classfile/systemDictionary.hpp"
 #include "code/codeCache.hpp"
+#include "code/SCArchive.hpp"
 #include "compiler/compileBroker.hpp"
 #include "compiler/compilerOracle.hpp"
 #include "gc/shared/collectedHeap.hpp"
@@ -446,6 +447,7 @@ void before_exit(JavaThread* thread, bool halt) {
   assert(!thread->has_pending_exception(), "must be");
 #endif
 
+  SCArchive::close();
 
   // Actual shutdown logic begins here.
 
