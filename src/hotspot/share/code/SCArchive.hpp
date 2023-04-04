@@ -36,17 +36,13 @@ private:
   int    _entries_count;     // number of recorded entries in archive
   size_t _archive_size;      // archive size in bytes
   size_t _table_offset;      // offset of SCAEntry array describing entries
-  size_t _strings_offset;    // offset of char strings (names, values) buffer
-  size_t _strings_size;      // size in bytes of strings buffer
 
 public:
-  void init(uint version, int count, size_t archive_size, size_t table_offset, size_t strings_offset, size_t strings_size) {
+  void init(uint version, int count, size_t archive_size, size_t table_offset) {
     _version        = version;
     _entries_count  = count;
     _archive_size   = archive_size;
     _table_offset   = table_offset;
-    _strings_offset = strings_offset;
-    _strings_size   = strings_size;
   }
 
   uint   version()        const { return _version; }
@@ -55,42 +51,47 @@ public:
 
   size_t archive_size()   const { return _archive_size; }
   size_t table_offset()   const { return _table_offset; }
-  size_t strings_offset() const { return _strings_offset; }
-  size_t strings_size()   const { return _strings_size; }
 };
 
 // Archive's entry
 class SCAEntry {
 private:
-  size_t   _offset;
-  size_t   _size;
+  size_t   _offset; // Offset to entry [first constans then code]
+  size_t   _name_offset; // Method's or intrinsic name
+  size_t   _name_size;
+  size_t   _code_offset; // Start of code
+  size_t   _code_size;
   uint32_t _id;     // vmIntrinsic::ID for stub or 0 for nmethod
   int      _idx;    // Sequential index in archive (< SCAHeader::_entries_count)
-  int      _strings_count; // Number of strings in archive for this entry
-                           // String is sequence of bytes terminated by 0
 
 public:
-  SCAEntry(size_t offset, size_t size, uint32_t id, int idx, int strings_count) {
+  SCAEntry(size_t offset, size_t name_offset, size_t name_size, size_t code_offset, size_t code_size, uint32_t id, int idx) {
     _offset = offset;
-    _size   = size;
+    _name_offset = name_offset;
+    _name_size   = name_size;
+    _code_offset = code_offset;
+    _code_size   = code_size;
     _id     = id;
     _idx    = idx;
-    _strings_count = strings_count;
   }
 
   SCAEntry() {
     _offset = 0;
-    _size   = 0;
-    _id     = 0;
-    _idx    = 0;
-    _strings_count = 0;
+    _name_offset = 0;
+    _name_size   = 0;
+    _code_offset = 0;
+    _code_size   = 0;
+    _id   = 0;
+    _idx  = 0;
   }
 
-  size_t   offset() const { return _offset; }
-  size_t   size()   const { return _size; }
-  uint32_t id()     const { return _id; }
-  int      idx()    const { return _idx; }
-  int      strings_count() const { return _strings_count; }
+  size_t   offset()      const { return _offset; }
+  size_t   code_offset() const { return _code_offset; }
+  size_t   code_size()   const { return _code_size; }
+  size_t   name_offset() const { return _name_offset; }
+  size_t   name_size()   const { return _name_size; }
+  uint32_t id()          const { return _id; }
+  int      idx()         const { return _idx; }
 };
 
 class SCAFile : public CHeapObj<mtCode> {
@@ -104,15 +105,11 @@ private:
 
   SCAEntry* _table;                   // Used when reading archive
   GrowableArray<SCAEntry>* _ga_table; // Used when writing archive
-/*
-  const char* _strings;                    // Used when reading archive
-  size_t* _strings_table; // Strings offset table per entry                  
-  GrowableArray<const char*>* _ga_strings; // Used when writing archive
-*/
   bool open_for_read() const;
   bool open_for_write() const;
 
-  void seek_to_position(size_t pos);
+  bool   seek_to_position(size_t pos);
+  bool   align_write();
   size_t read_bytes(void* buffer, size_t nbytes);
   size_t write_bytes(const void* buffer, size_t nbytes);
 
@@ -127,8 +124,8 @@ public:
 
   bool finish_write();
 
-  bool load_stub(StubCodeGenerator* cgen, vmIntrinsicID id, address start);
-  bool store_stub(StubCodeGenerator* cgen, vmIntrinsicID id, address start);
+  bool load_stub(StubCodeGenerator* cgen, vmIntrinsicID id, const char* name, address start);
+  bool store_stub(StubCodeGenerator* cgen, vmIntrinsicID id, const char* name, address start);
 };
 
 class SCArchive {
@@ -142,8 +139,8 @@ public:
   static void initialize();
   static void close();
 
-  static bool load_stub(StubCodeGenerator* cgen, vmIntrinsicID id, address start);
-  static bool store_stub(StubCodeGenerator* cgen, vmIntrinsicID id, address start);
+  static bool load_stub(StubCodeGenerator* cgen, vmIntrinsicID id, const char* name, address start);
+  static bool store_stub(StubCodeGenerator* cgen, vmIntrinsicID id, const char* name, address start);
 };
 
 #endif // SHARE_CODE_SCARCHIVE_HPP
