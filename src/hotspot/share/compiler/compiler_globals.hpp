@@ -385,7 +385,7 @@
   product(bool, LoadSharedCode, false,                                      \
           "Load compiled code")                                             \
                                                                             \
-  product(ccstr, SharedCodeFile, "code.jsa",                                \
+  product(ccstr, SharedCodeArchive, "code.jsa",                             \
           "File with compiled code")                                        \
                                                                             \
 

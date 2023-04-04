@@ -2976,6 +2976,10 @@ address StubGenerator::generate_multiplyToLen() {
   StubCodeMark mark(this, "StubRoutines", "multiplyToLen");
   address start = __ pc();
 
+  if (SCArchive::load_stub(this, vmIntrinsics::_multiplyToLen, start)) {
+    return start;
+  }
+
   // Win64: rcx, rdx, r8, r9 (c_rarg0, c_rarg1, ...)
   // Unix:  rdi, rsi, rdx, rcx, r8, r9 (c_rarg0, c_rarg1, ...)
   const Register x     = rdi;
@@ -3016,6 +3020,7 @@ address StubGenerator::generate_multiplyToLen() {
   __ leave(); // required for proper stackwalking of RuntimeStub frame
   __ ret(0);
 
+  SCArchive::store_stub(this, vmIntrinsics::_multiplyToLen, start);
   return start;
 }
 
@@ -3087,6 +3092,10 @@ address StubGenerator::generate_squareToLen() {
   StubCodeMark mark(this, "StubRoutines", "squareToLen");
   address start = __ pc();
 
+  if (SCArchive::load_stub(this, vmIntrinsics::_squareToLen, start)) {
+    return start;
+  }
+
   // Win64: rcx, rdx, r8, r9 (c_rarg0, c_rarg1, ...)
   // Unix:  rdi, rsi, rdx, rcx (c_rarg0, c_rarg1, ...)
   const Register x      = rdi;
@@ -3114,6 +3123,7 @@ address StubGenerator::generate_squareToLen() {
   __ leave(); // required for proper stackwalking of RuntimeStub frame
   __ ret(0);
 
+  SCArchive::store_stub(this, vmIntrinsics::_squareToLen, start);
   return start;
 }
 
