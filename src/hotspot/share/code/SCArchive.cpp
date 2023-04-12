@@ -28,10 +28,8 @@
 #include "code/codeBlob.hpp"
 #include "code/SCArchive.hpp"
 #include "logging/log.hpp"
-#include "opto/runtime.hpp"
 #include "runtime/os.inline.hpp"
 #include "runtime/stubCodeGenerator.hpp"
-
 
 #include <sys/stat.h>
 #include <errno.h>
@@ -284,7 +282,7 @@ SCAEntry* SCAFile::find_entry(uint32_t id) {
       return &(_table[i]);
     }
   }
-  return nullptr; 
+  return nullptr;
 }
 
 bool SCAFile::finish_write() {
@@ -409,9 +407,9 @@ bool SCAFile::read_relocations(CodeBuffer* buffer, size_t reloc_count, address o
     if (n != data_size) {
       return false;
     }
- 
+
     // Create fake original CodeBuffer
-    CodeBuffer orig_cb(orig_start, orig_size);
+    CodeBuffer orig_cb(orig_start, (CodeBuffer::csize_t)orig_size);
     RelocIterator iter(code);
     int id = 0;
     while (iter.next()) {
@@ -446,10 +444,12 @@ bool SCAFile::read_relocations(CodeBuffer* buffer, size_t reloc_count, address o
 }
 
 bool SCAFile::load_exception_blob(CodeBuffer* buffer, int* pc_offset) {
+#ifdef ASSERT
 if (UseNewCode2) {
   FlagSetting fs(PrintRelocations, true);
   buffer->print();
 }
+#endif
   if (open_for_read()) {
     SCAEntry* entry = find_entry(999);
     if (entry == nullptr) {
@@ -519,13 +519,15 @@ if (UseNewCode2) {
     if (!read_relocations(buffer, reloc_count, orig_start, orig_size)) {
       return false;
     }
- 
+
     log_info(sca)("Read stub '%s' from shared code archive '%s'", name, _archive_path);
+#ifdef ASSERT
 if (UseNewCode2) {
   FlagSetting fs(PrintRelocations, true);
   buffer->print();
   buffer->decode();
 }
+#endif
     return true;
   }
   return false;
@@ -579,16 +581,18 @@ int SCAFile::write_relocations(CodeBuffer* buffer) {
       return -1;
     }
   }
-  return reloc_count;
+  return (int)reloc_count;
 }
 
 bool SCAFile::store_exception_blob(CodeBuffer* buffer, int pc_offset) {
   if (open_for_write()) {
+#ifdef ASSERT
 if (UseNewCode2) {
   FlagSetting fs(PrintRelocations, true);
   buffer->print();
   buffer->decode();
 }
+#endif
     if (!align_write()) {
       return false;
     }
@@ -638,7 +642,7 @@ if (UseNewCode2) {
     size_t reloc_offset = _file_offset - entry_position;
 
     // Write relocInfo array
-    size_t reloc_count = write_relocations(buffer);
+    int reloc_count = write_relocations(buffer);
     if (reloc_count < 0) {
       return false;
     }
