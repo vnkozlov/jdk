@@ -2976,7 +2976,7 @@ address StubGenerator::generate_multiplyToLen() {
   StubCodeMark mark(this, "StubRoutines", "multiplyToLen");
   address start = __ pc();
 
-  if (SCArchive::load_stub(this, vmIntrinsics::_multiplyToLen, "multiplyToLen", start)) {
+  if (SCAFile::load_stub(this, vmIntrinsics::_multiplyToLen, "multiplyToLen", start)) {
     return start;
   }
 
@@ -3020,7 +3020,7 @@ address StubGenerator::generate_multiplyToLen() {
   __ leave(); // required for proper stackwalking of RuntimeStub frame
   __ ret(0);
 
-  SCArchive::store_stub(this, vmIntrinsics::_multiplyToLen, "multiplyToLen", start);
+  SCAFile::store_stub(this, vmIntrinsics::_multiplyToLen, "multiplyToLen", start);
   return start;
 }
 
@@ -3092,7 +3092,7 @@ address StubGenerator::generate_squareToLen() {
   StubCodeMark mark(this, "StubRoutines", "squareToLen");
   address start = __ pc();
 
-  if (SCArchive::load_stub(this, vmIntrinsics::_squareToLen, "squareToLen", start)) {
+  if (SCAFile::load_stub(this, vmIntrinsics::_squareToLen, "squareToLen", start)) {
     return start;
   }
 
@@ -3123,7 +3123,7 @@ address StubGenerator::generate_squareToLen() {
   __ leave(); // required for proper stackwalking of RuntimeStub frame
   __ ret(0);
 
-  SCArchive::store_stub(this, vmIntrinsics::_squareToLen, "squareToLen", start);
+  SCAFile::store_stub(this, vmIntrinsics::_squareToLen, "squareToLen", start);
   return start;
 }
 
@@ -3221,7 +3221,7 @@ address StubGenerator::generate_mulAdd() {
   StubCodeMark mark(this, "StubRoutines", "mulAdd");
   address start = __ pc();
 
-  if (SCArchive::load_stub(this, vmIntrinsics::_mulAdd, "mulAdd", start)) {
+  if (SCAFile::load_stub(this, vmIntrinsics::_mulAdd, "mulAdd", start)) {
     return start;
   }
 
@@ -3258,7 +3258,7 @@ address StubGenerator::generate_mulAdd() {
   __ leave(); // required for proper stackwalking of RuntimeStub frame
   __ ret(0);
 
-  SCArchive::store_stub(this, vmIntrinsics::_mulAdd, "mulAdd", start);
+  SCAFile::store_stub(this, vmIntrinsics::_mulAdd, "mulAdd", start);
   return start;
 }
 
@@ -4006,7 +4006,7 @@ void StubGenerator::generate_final_stubs() {
 
   BarrierSetNMethod* bs_nm = BarrierSet::barrier_set()->barrier_set_nmethod();
   if (bs_nm != nullptr) {
-    StubRoutines::x86::_method_entry_barrier = generate_method_entry_barrier();
+    StubRoutines::_method_entry_barrier = generate_method_entry_barrier();
   }
 
   if (UseVectorizedMismatchIntrinsic) {

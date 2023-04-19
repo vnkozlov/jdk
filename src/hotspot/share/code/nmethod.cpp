@@ -557,7 +557,9 @@ nmethod* nmethod::new_nmethod(const methodHandle& method,
 )
 {
   assert(debug_info->oop_recorder() == code_buffer->oop_recorder(), "shared OR");
-  code_buffer->finalize_oop_references(method);
+  if (compiler->is_jvmci()) {
+    code_buffer->finalize_oop_references(method);
+  }
   // create nmethod
   nmethod* nm = nullptr;
 #if INCLUDE_JVMCI
@@ -626,6 +628,15 @@ nmethod* nmethod::new_nmethod(const methodHandle& method,
   }
   // Do verification and logging outside CodeCache_lock.
   if (nm != nullptr) {
+
+#ifdef ASSERT
+if (UseNewCode3) {
+  FlagSetting fs(PrintRelocations, true);
+  nm->print();
+  nm->decode(tty);
+}
+#endif
+
     // Safepoints in nmethod::verify aren't allowed because nm hasn't been installed yet.
     DEBUG_ONLY(nm->verify();)
     nm->log_new_nmethod();

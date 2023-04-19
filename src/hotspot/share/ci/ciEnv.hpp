@@ -383,7 +383,8 @@ public:
                        bool                      has_wide_vectors,
                        bool                      has_monitors,
                        int                       immediate_oops_patched,
-                       RTMState                  rtm_state = NoRTM);
+                       RTMState                  rtm_state = NoRTM,
+                       bool                      is_shared = false);
 
   // Access to certain well known ciObjects.
 #define VM_CLASS_FUNC(name, ignore_s) \

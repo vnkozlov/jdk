@@ -40,6 +40,7 @@
 #include "classfile/vmSymbols.hpp"
 #include "code/codeCache.hpp"
 #include "code/scopeDesc.hpp"
+#include "code/SCArchive.hpp"
 #include "compiler/compilationLog.hpp"
 #include "compiler/compilationPolicy.hpp"
 #include "compiler/compileBroker.hpp"
@@ -1045,7 +1046,8 @@ void ciEnv::register_method(ciMethod* target,
                             bool has_wide_vectors,
                             bool has_monitors,
                             int immediate_oops_patched,
-                            RTMState  rtm_state) {
+                            RTMState  rtm_state,
+                            bool is_shared) {
   VM_ENTRY_MARK;
   nmethod* nm = nullptr;
   {
@@ -1090,7 +1092,7 @@ void ciEnv::register_method(ciMethod* target,
       record_failure("method holder is in error state");
     }
 
-    if (!failing()) {
+    if (!failing() && !is_shared) {
       if (log() != nullptr) {
         // Log the dependencies which this compilation declares.
         dependencies()->log_all_dependencies();
@@ -1128,6 +1130,23 @@ void ciEnv::register_method(ciMethod* target,
     assert(offsets->value(CodeOffsets::Deopt) != -1, "must have deopt entry");
     assert(offsets->value(CodeOffsets::Exceptions) != -1, "must have exception entry");
 
+    if (!is_shared) {
+      code_buffer->finalize_oop_references(method);
+    }
+    if (rtm_state == NoRTM) {
+      SCAFile::store_nmethod(method,
+                             compile_id(),
+                             entry_bci,
+                             offsets,
+                             orig_pc_offset,
+                             debug_info(), dependencies(), code_buffer,
+                             frame_words, oop_map_set,
+                             handler_table, inc_table,
+                             compiler,
+                             has_unsafe_access,
+                             has_wide_vectors,
+                             has_monitors);
+    }
     nm =  nmethod::new_nmethod(method,
                                compile_id(),
                                entry_bci,

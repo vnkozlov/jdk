@@ -931,7 +931,7 @@ void RelocIterator::print_current() {
       } else {
         CodeBlob* cb = CodeCache::find_blob(dest);
         if (cb != nullptr) {
-          tty->print(" %s", cb->name());
+          tty->print(" Blob:%s", cb->name());
         } else {
           ResourceMark rm;
           const int buflen = 1024;
