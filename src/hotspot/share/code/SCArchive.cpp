@@ -35,6 +35,7 @@
 #include "code/codeCache.hpp"
 #include "code/oopRecorder.inline.hpp"
 #include "code/SCArchive.hpp"
+#include "gc/g1/g1BarrierSetRuntime.hpp"
 #include "logging/log.hpp"
 #include "oops/klass.inline.hpp"
 #include "oops/method.inline.hpp"
@@ -499,12 +500,8 @@ bool SCAFile::read_relocations(CodeBuffer* buffer, CodeBuffer* orig_buffer, uint
         case relocInfo::metadata_type:
           iter.reloc()->fix_relocation_after_move(orig_buffer, buffer);
           break;
-        case relocInfo::virtual_call_type:
-          fatal("virtual_call_type unimplemented");
-          break;
+        case relocInfo::virtual_call_type:   // Fall through. They all call resolve_*_call blobs.
         case relocInfo::opt_virtual_call_type:
-          fatal("opt_virtual_call_type unimplemented");
-          break;
         case relocInfo::static_call_type: {
           iter.reloc()->fix_relocation_after_move(orig_buffer, buffer);
           address dest = _table->address_for_id(reloc_data[j]);
@@ -740,12 +737,8 @@ bool SCAFile::write_relocations(CodeBuffer* buffer, uint& max_reloc_size) {
           break;
         case relocInfo::metadata_type:
           break;
-        case relocInfo::virtual_call_type:
-          fatal("virtual_call_type unimplemented");
-          break;
+        case relocInfo::virtual_call_type:  // Fall through. They all call resolve_*_call blobs.
         case relocInfo::opt_virtual_call_type:
-          fatal("opt_virtual_call_type unimplemented");
-          break;
         case relocInfo::static_call_type: {
           address dest = ((CallRelocation*)iter.reloc())->destination();
           reloc_data[j] = _table->id_for_address(dest);
@@ -956,6 +949,7 @@ OopMapSet* SCAFile::read_oop_maps() {
     if (n != sizeof(OopMap)) {
       return nullptr;
     }
+    stream->set_position(data_size);
     oop_map->set_write_stream(stream);
     n = read_bytes(oop_map->data(), (uint)data_size);
     if (n != (uint)data_size) {
@@ -1015,7 +1009,37 @@ bool SCAFile::read_metadata(OopRecorder* oop_recorder, ciMethod* target) {
       if (kind < 0) {
         continue; // Not supported yet
       }
-      if (kind == 1) { // Method*
+      if (kind == 1) { // Klass*
+        int name_length = 0;
+        n = read_bytes(&name_length, sizeof(int));
+        if (n != sizeof(int)) {
+          return false;
+        }
+        int total_length = name_length + 1;
+        char* dest = NEW_RESOURCE_ARRAY(char, total_length);
+        n = read_bytes(dest, total_length);
+        if (n != (uint)total_length) {
+          return false;
+        }
+        TempNewSymbol klass_sym = SymbolTable::probe(&(dest[0]), name_length);
+        dest[name_length] = '\0';
+        if (klass_sym == NULL) {
+          log_info(sca)("Probe failed for class %s", &(dest[0]));
+          return false;
+        }
+        // Use class loader of compiled method.
+        Thread* thread = Thread::current();
+        Handle loader(thread, comp_method->method_holder()->class_loader());
+        Handle protection_domain(thread, comp_method->method_holder()->protection_domain());
+        Klass* k = SystemDictionary::find_instance_or_array_klass(thread, klass_sym, loader, protection_domain);
+        assert(!thread->has_pending_exception(), "should not throw");
+        if (k != NULL) {
+          log_info(sca)("%s %s (lookup)", comp_method->method_holder()->external_name(), k->external_name());
+        } else {
+          log_info(sca)("Lookup failed for class %s", &(dest[0]));
+        }
+        oop_recorder->find_index(k);
+      } else if (kind == 2) { // Method*
         int holder_length = 0;
         n = read_bytes(&holder_length, sizeof(int));
         if (n != sizeof(int)) {
@@ -1049,13 +1073,11 @@ bool SCAFile::read_metadata(OopRecorder* oop_recorder, ciMethod* target) {
         Handle protection_domain(thread, comp_method->method_holder()->protection_domain());
         Klass* k = SystemDictionary::find_instance_or_array_klass(thread, klass_sym, loader, protection_domain);
         assert(!thread->has_pending_exception(), "should not throw");
-
         if (k != NULL) {
           log_info(sca)("%s %s (lookup)", comp_method->method_holder()->external_name(), k->external_name());
         } else {
           log_info(sca)("Lookup failed for class %s", &(dest[0]));
         }
-
         TempNewSymbol name_sym = SymbolTable::probe(&(dest[holder_length + 1]), name_length);
         int pos = holder_length + 1 + name_length;
         dest[pos++] = '\0';
@@ -1069,7 +1091,7 @@ bool SCAFile::read_metadata(OopRecorder* oop_recorder, ciMethod* target) {
           return false;
         }
         Method* m = InstanceKlass::cast(k)->find_method(name_sym, sign_sym);
-        if (k != NULL) {
+        if (m != NULL) {
           ResourceMark rm;
           log_info(sca)("Method lookup: %s", m->name_and_sig_as_C_string());
         } else {
@@ -1099,7 +1121,29 @@ bool SCAFile::write_metadata(OopRecorder* oop_recorder, const methodHandle& comp
         return false;
       }
     } else {
-      if (m->is_method()) {
+      if (m->is_klass()) {
+        Klass* klass = (Klass*)m;
+        Symbol* name = klass->name();
+        int name_length = name->utf8_length();
+        int total_length = name_length + 1;
+        char* dest = NEW_RESOURCE_ARRAY(char, total_length);
+        name->as_C_string(dest, total_length);
+        dest[total_length - 1] = '\0';
+        int kind = 1; // Klass*
+        n = write_bytes(&kind, sizeof(int));
+        if (n != sizeof(int)) {
+          return false;
+        }
+        n = write_bytes(&name_length, sizeof(int));
+        if (n != sizeof(int)) {
+          return false;
+        }
+        n = write_bytes(dest, total_length);
+        if (n != (uint)total_length) {
+          return false;
+        }
+        log_info(sca)("Write metadata [%d]: %s", i, dest);
+      } else if (m->is_method()) {
         Method* method = (Method*)m;
         Symbol* name   = method->name();
         Symbol* holder = method->klass_name();
@@ -1118,7 +1162,7 @@ bool SCAFile::write_metadata(OopRecorder* oop_recorder, const methodHandle& comp
         dest[pos++] = ' ';
         signat->as_C_string(&(dest[pos]), (total_length - pos));
         dest[total_length - 1] = '\0';
-        int kind = 1; // Method*
+        int kind = 2; // Method*
         n = write_bytes(&kind, sizeof(int));
         if (n != sizeof(int)) {
           return false;
@@ -1162,8 +1206,16 @@ bool SCAFile::load_nmethod(ciEnv* env, ciMethod* target, int entry_bci, Abstract
   if (archive == nullptr) {
     return false;
   }
-  int compile_id = env->compile_id();
-  SCAEntry* entry = archive->find_entry(SCAEntry::Code, (uint)compile_id);
+  const char* target_name = nullptr;
+  {
+    VM_ENTRY_MARK;
+    ResourceMark rm;
+    methodHandle method(THREAD, target->get_Method());
+    target_name = os::strdup(method->name_and_sig_as_C_string());
+  }
+  uint hash = java_lang_String::hash_code((const jbyte*)target_name, strlen(target_name));
+
+  SCAEntry* entry = archive->find_entry(SCAEntry::Code, hash);
   if (entry == nullptr) {
     return false;
   }
@@ -1184,18 +1236,12 @@ bool SCAFile::load_nmethod(ciEnv* env, ciMethod* target, int entry_bci, Abstract
     FREE_C_HEAP_ARRAY(char, name);
     return false;
   }
-  {
-    VM_ENTRY_MARK;
-    ResourceMark rm;
-    methodHandle method(THREAD, target->get_Method());
-    const char* target_name = method->name_and_sig_as_C_string();
-
-    if (strncmp(target_name, name, (name_size - 1)) != 0) {
-      log_warning(sca)("Saved stub's name '%s' is different from '%s'", name, target_name);
-      archive->failed();
-      return false;
-    }
+  if (strncmp(target_name, name, (name_size - 1)) != 0) {
+    log_warning(sca)("Saved nmethod's name '%s' is different from '%s'", name, target_name);
+    archive->failed();
+    return false;
   }
+  os::free((void*)target_name);
 
   uint code_offset = entry_position + entry->code_offset();
   if (!archive->seek_to_position(code_offset)) {
@@ -1394,6 +1440,7 @@ if (UseNewCode3) {
   // Write name
   uint name_offset = 0;
   uint name_size   = 0;
+  uint hash = 0;
   uint n;
   {
     ResourceMark rm;
@@ -1404,6 +1451,7 @@ if (UseNewCode3) {
     if (n != name_size) {
       return false;
     }
+    hash = java_lang_String::hash_code((const jbyte*)name, strlen(name));
   }
 
   if (!archive->align_write()) {
@@ -1498,7 +1546,7 @@ if (UseNewCode3) {
 
   SCAEntry entry(entry_position, name_offset, name_size,
                  code_offset, code_size, reloc_offset, reloc_size,
-                 SCAEntry::Code, compile_id, archive->_header.next_idx());
+                 SCAEntry::Code, hash, archive->_header.next_idx());
   archive->add_entry(entry);
   {
     ResourceMark rm;
@@ -1527,8 +1575,11 @@ void SCATable::init() {
   SET_ADDRESS(_extrs, OptoRuntime::handle_exception_C);
 #endif
   SET_ADDRESS(_extrs, CompressedOops::ptrs_base_addr());
+  SET_ADDRESS(_extrs, G1BarrierSetRuntime::write_ref_field_post_entry);
+  SET_ADDRESS(_extrs, G1BarrierSetRuntime::write_ref_field_pre_entry);
+#if defined(X86) || defined(AARCH64) || defined(RISCV64)
   SET_ADDRESS(_extrs, MacroAssembler::debug64);
-
+#endif
   // Stubs
   SET_ADDRESS(_stubs, StubRoutines::method_entry_barrier());
 
