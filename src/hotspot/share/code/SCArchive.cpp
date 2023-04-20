@@ -423,7 +423,7 @@ bool SCAFile::store_stub(StubCodeGenerator* cgen, vmIntrinsicID id, const char* 
 
   // Write name
   uint name_offset = 0; // Write name first
-  uint name_size = strlen(name) + 1; // Includes '/0'
+  uint name_size = (uint)strlen(name) + 1; // Includes '/0'
   uint n = archive->write_bytes(name, name_size);
   if (n != name_size) {
     return false;
@@ -470,8 +470,8 @@ bool SCAFile::read_relocations(CodeBuffer* buffer, CodeBuffer* orig_buffer, uint
     }
     uint reloc_size = reloc_count * sizeof(relocInfo);
     CodeSection* cs  = buffer->code_section(i);
-    if (!cs->has_locs()) {
-      cs->initialize_locs(reloc_count);
+    if (cs->locs_capacity() < reloc_count) {
+      cs->expand_locs(reloc_count);
     }
     relocInfo* reloc_start = cs->locs_start();
     n = read_bytes(reloc_start, reloc_size);
@@ -479,7 +479,7 @@ bool SCAFile::read_relocations(CodeBuffer* buffer, CodeBuffer* orig_buffer, uint
       success = false;
       break;
     }
-    cs->set_locs_end(reloc_start + (int)reloc_count);
+    cs->set_locs_end(reloc_start + reloc_count);
     cs->set_locs_point(cs->start() + locs_point_off);
 
     // Read additional relocation data: uint per relocation
@@ -496,19 +496,32 @@ bool SCAFile::read_relocations(CodeBuffer* buffer, CodeBuffer* orig_buffer, uint
       switch (iter.type()) {
         case relocInfo::none:
           break;
+        case relocInfo::metadata_type:
+          iter.reloc()->fix_relocation_after_move(orig_buffer, buffer);
+          break;
         case relocInfo::virtual_call_type:
           fatal("virtual_call_type unimplemented");
           break;
         case relocInfo::opt_virtual_call_type:
           fatal("opt_virtual_call_type unimplemented");
           break;
-        case relocInfo::static_call_type:
-          fatal("static_call_type unimplemented");
+        case relocInfo::static_call_type: {
+          iter.reloc()->fix_relocation_after_move(orig_buffer, buffer);
+          address dest = _table->address_for_id(reloc_data[j]);
+          if (dest != (address)-1) {
+            ((CallRelocation*)iter.reloc())->set_destination(dest);
+          }
+          break;
+        }
+        case relocInfo::static_stub_type:
+          iter.reloc()->fix_relocation_after_move(orig_buffer, buffer);
           break;
         case relocInfo::runtime_call_type: {
           iter.reloc()->fix_relocation_after_move(orig_buffer, buffer);
           address dest = _table->address_for_id(reloc_data[j]);
-          ((CallRelocation*)iter.reloc())->set_destination(dest);
+          if (dest != (address)-1) {
+            ((CallRelocation*)iter.reloc())->set_destination(dest);
+          }
           break;
         }
         case relocInfo::runtime_call_w_cp_type:
@@ -725,14 +738,20 @@ bool SCAFile::write_relocations(CodeBuffer* buffer, uint& max_reloc_size) {
       switch (iter.type()) {
         case relocInfo::none:
           break;
+        case relocInfo::metadata_type:
+          break;
         case relocInfo::virtual_call_type:
           fatal("virtual_call_type unimplemented");
           break;
         case relocInfo::opt_virtual_call_type:
           fatal("opt_virtual_call_type unimplemented");
           break;
-        case relocInfo::static_call_type:
-          fatal("static_call_type unimplemented");
+        case relocInfo::static_call_type: {
+          address dest = ((CallRelocation*)iter.reloc())->destination();
+          reloc_data[j] = _table->id_for_address(dest);
+          break;
+        }
+        case relocInfo::static_stub_type:
           break;
         case relocInfo::runtime_call_type: {
           // Record offset of runtime destination
@@ -835,7 +854,7 @@ if (UseNewCode2) {
   // Write name
   const char* name = buffer->name();
   uint name_offset = archive->_file_offset  - entry_position;
-  uint name_size = strlen(name) + 1; // Includes '/0'
+  uint name_size = (uint)strlen(name) + 1; // Includes '/0'
   n = archive->write_bytes(name, name_size);
   if (n != name_size) {
     return false;
@@ -916,36 +935,35 @@ bool SCAFile::write_debug_info(DebugInformationRecorder* recorder) {
   return true;
 }
 
-bool SCAFile::read_oop_maps(OopMapSet* oop_maps) {
+OopMapSet* SCAFile::read_oop_maps() {
   uint om_count = 0;
   uint n = read_bytes(&om_count, sizeof(int));
   if (n != sizeof(int)) {
-    return false;
+    return nullptr;
   }
-  oop_maps = new OopMapSet(om_count);
+  OopMapSet* oop_maps = new OopMapSet(om_count);
   for (int i = 0; i < (int)om_count; i++) {
     int data_size = 0;
     n = read_bytes(&data_size, sizeof(int));
     if (n != sizeof(int)) {
-      return false;
+      return nullptr;
     }
     OopMap* oop_map = new OopMap(data_size);
     // Preserve allocated stream
     CompressedWriteStream* stream = oop_map->write_stream();
-    OopMap* om = oop_maps->at(i);
     // Read data which overwrites default data
     n = read_bytes(oop_map, sizeof(OopMap));
     if (n != sizeof(OopMap)) {
-      return false;
+      return nullptr;
     }
     oop_map->set_write_stream(stream);
     n = read_bytes(oop_map->data(), (uint)data_size);
     if (n != (uint)data_size) {
-      return false;
+      return nullptr;
     }
     oop_maps->add(oop_map);
   }
-  return true;
+  return oop_maps;
 }
 
 bool SCAFile::write_oop_maps(OopMapSet* oop_maps) {
@@ -1190,9 +1208,9 @@ bool SCAFile::load_nmethod(ciEnv* env, ciMethod* target, int entry_bci, Abstract
   if (n != sizeof(int)) {
     return false;
   }
-  bool has_monitors      = flags & 0xFF;
-  bool has_wide_vectors  = (flags >>  8) & 0xFF;
-  bool has_unsafe_access = (flags >> 16) & 0xFF;
+  bool has_monitors      = (flags & 0xFF) > 0;
+  bool has_wide_vectors  = ((flags >>  8) & 0xFF) > 0;
+  bool has_unsafe_access = ((flags >> 16) & 0xFF) > 0;
 
   int orig_pc_offset = 0;
   n = archive->read_bytes(&orig_pc_offset, sizeof(int));
@@ -1236,7 +1254,7 @@ bool SCAFile::load_nmethod(ciEnv* env, ciMethod* target, int entry_bci, Abstract
   if (n != sizeof(int)) {
     return false;
   }
-  if (dependencies_size) {
+  if (dependencies_size > 0) {
     u_char* dependencies_buffer = NEW_RESOURCE_ARRAY(u_char, dependencies_size);
     n = archive->read_bytes(dependencies_buffer, dependencies_size);
     if (n != (uint)dependencies_size) {
@@ -1247,8 +1265,8 @@ bool SCAFile::load_nmethod(ciEnv* env, ciMethod* target, int entry_bci, Abstract
   env->set_dependencies(dependencies);
 
   // Read oop maps
-  OopMapSet* oop_maps = nullptr;
-  if (!archive->read_oop_maps(oop_maps)) {
+  OopMapSet* oop_maps = archive->read_oop_maps();
+  if (oop_maps == nullptr) {
     return false;
   }
 
@@ -1285,7 +1303,8 @@ bool SCAFile::load_nmethod(ciEnv* env, ciMethod* target, int entry_bci, Abstract
     }
   }
 
-  CodeBuffer buffer("Compile::Fill_buffer", entry->code_size(), entry->reloc_size());
+  uint reloc_max_size = entry->reloc_size();
+  CodeBuffer buffer("Compile::Fill_buffer", entry->code_size(), reloc_max_size);
   buffer.initialize_oop_recorder(oop_recorder);
 
   // Create fake original CodeBuffer
@@ -1301,7 +1320,7 @@ bool SCAFile::load_nmethod(ciEnv* env, ciMethod* target, int entry_bci, Abstract
   if (!archive->seek_to_position(reloc_offset)) {
     return false;
   }
-  if (!archive->read_relocations(&buffer, &orig_buffer, entry->reloc_size())) {
+  if (!archive->read_relocations(&buffer, &orig_buffer, reloc_max_size)) {
     return false;
   }
 
@@ -1393,7 +1412,7 @@ if (UseNewCode3) {
 
   uint code_offset = archive->_file_offset - entry_position;
 
-  int flags = (has_unsafe_access << 16) | (has_wide_vectors << 8) | has_monitors;
+  int flags = ((has_unsafe_access ? 1 : 0) << 16) | ((has_wide_vectors ? 1 : 0) << 8) | (has_monitors ? 1 : 0);
   n = archive->write_bytes(&flags, sizeof(int));
   if (n != sizeof(int)) {
     return false;
@@ -1426,7 +1445,7 @@ if (UseNewCode3) {
   }
 
   // Write Dependencies
-  int dependencies_size = dependencies->size_in_bytes();
+  int dependencies_size = (int)dependencies->size_in_bytes();
   n = archive->write_bytes(&dependencies_size, sizeof(int));
   if (n != sizeof(int)) {
     return false;
@@ -1578,6 +1597,9 @@ address SCATable::address_for_id(int idx) {
   if (!_complete) {
     fatal("SCA table is not complete");
   }
+  if (idx == -1) {
+    return (address)-1;
+  }
   uint id = (uint)idx;
   if (idx < 0 || id == (_extrs_length + _stubs_length + _blobs_length)) {
     fatal("Incorrect id %d for SCA table", id);
@@ -1601,6 +1623,9 @@ address SCATable::address_for_id(int idx) {
 
 int SCATable::id_for_address(address addr) {
   int id = -1;
+  if (addr == (address)-1) { // Static call stub has jump to itself
+    return id;
+  }
   if (!_complete) {
     fatal("SCA table is not complete");
   }

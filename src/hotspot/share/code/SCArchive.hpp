@@ -201,7 +201,7 @@ public:
   bool write_relocations(CodeBuffer* buffer, uint& reloc_size);
   DebugInformationRecorder* read_debug_info(OopRecorder* oop_recorder);
   bool write_debug_info(DebugInformationRecorder* recorder);
-  bool read_oop_maps(OopMapSet* oop_maps);
+  OopMapSet* read_oop_maps();
   bool write_oop_maps(OopMapSet* oop_maps);
   bool read_metadata(OopRecorder* oop_recorder, ciMethod* target);
   bool write_metadata(OopRecorder* oop_recorder, const methodHandle& comp_method);
