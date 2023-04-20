@@ -24,6 +24,7 @@
 
 #include "precompiled.hpp"
 #include "asm/macroAssembler.hpp"
+#include "compiler/abstractCompiler.hpp"
 #include "classfile/symbolTable.hpp"
 #include "classfile/systemDictionary.hpp"
 #include "classfile/vmIntrinsics.hpp"
@@ -109,7 +110,7 @@ bool SCArchive::open_for_read(const char* archive_path) {
   } else {
     log_info(sca)("Opened for read shared code archive '%s'", archive_path);
   }
-  SCAFile* archive = new SCAFile(archive_path, fd, (size_t)st.st_size, true /* for_read */);
+  SCAFile* archive = new SCAFile(archive_path, fd, (uint)st.st_size, true /* for_read */);
   if (archive->fd() < 0) { // failed
     delete archive;
     return false;
@@ -141,7 +142,7 @@ bool SCArchive::open_for_write(const char* archive_path) {
   return true;
 }
 
-SCAFile::SCAFile(const char* archive_path, int fd, size_t file_size, bool for_read) {
+SCAFile::SCAFile(const char* archive_path, int fd, uint file_size, bool for_read) {
   _archive_path = archive_path;
   _file_size = file_size;
   _file_offset = 0;
@@ -153,24 +154,24 @@ SCAFile::SCAFile(const char* archive_path, int fd, size_t file_size, bool for_re
   _write_entries = nullptr;
 
   // Read header st the begining of archive
-  size_t header_size = sizeof(SCAHeader);
+  uint header_size = sizeof(SCAHeader);
   if (for_read) {
     // Read header from archive
     if (!seek_to_position(0)) {
       return;
     }
-    size_t n = read_bytes((void*)&_header, header_size);
+    uint n = read_bytes((void*)&_header, header_size);
     if (n != header_size) {
       return;
     }
     assert(_header.version() == VM_Version::jvm_version(), "sanity");
-    assert(_header.archive_size() <= file_size, "recorded %d vs actual %d", (int)_header.archive_size(), (int)file_size);
+    assert(_header.archive_size() <= file_size, "recorded %d vs actual %d", _header.archive_size(), file_size);
     log_info(sca)("Read header from shared code archive '%s'", archive_path);
   } else {
     // Write initial version of header
     _header.init(VM_Version::jvm_version(), 0 /* entry_count */, 0 /* archive_size */, 0 /* entries_offset */);
-    size_t header_size = sizeof(SCAHeader);
-    size_t n = write_bytes((const void*)&_header, header_size);
+    uint header_size = sizeof(SCAHeader);
+    uint n = write_bytes((const void*)&_header, header_size);
     if (n != header_size) {
       return;
     }
@@ -237,12 +238,13 @@ SCAFile* SCAFile::open_for_write() {
   return nullptr;
 }
 
-bool SCAFile::seek_to_position(size_t pos) {
+bool SCAFile::seek_to_position(uint pos) {
   if (pos == _file_offset) {
     return true;
   }
+  assert(pos < _file_size, "offset:%d >= file size:%d", pos, _file_size);
   if (os::lseek(_fd, (long)pos, SEEK_SET) < 0) {
-    log_warning(sca)("Failed to seek to position " SIZE_FORMAT " in shared code archive file '%s'", pos, _archive_path);
+    log_warning(sca)("Failed to seek to position %d in shared code archive file '%s'", pos, _archive_path);
     // Close the file if there's a problem reading it.
     failed();
     return false;
@@ -256,49 +258,50 @@ static char align_buffer[256] = { 0 };
 bool SCAFile::align_write() {
   // We are not executing code from archive - we copy it by bytes first.
   // No need for big alignment (or at all).
-  size_t padding = sizeof(size_t) - (_file_offset & (sizeof(size_t) - 1));
+  uint padding = sizeof(uint) - (_file_offset & (sizeof(uint) - 1));
   if (padding == 0) {
     return true;
   }
-  size_t n = write_bytes((const void*)&align_buffer, padding);
+  uint n = write_bytes((const void*)&align_buffer, padding);
   if (n != padding) {
     return false;
   }
-  log_info(sca)("Adjust write alignment in shared code archive '%s'", _archive_path);
+  log_debug(sca)("Adjust write alignment in shared code archive '%s'", _archive_path);
   return true;
 }
 
-size_t SCAFile::read_bytes(void* buffer, size_t nbytes) {
+uint SCAFile::read_bytes(void* buffer, uint nbytes) {
   assert(for_read(), "Archive file is not open");
   if (nbytes == 0) {
     return 0;
   }
-  size_t n = ::read(_fd, buffer, (unsigned int)nbytes);
+  assert((_file_offset + nbytes) <= _file_size, "Reading %d bytes from offset:%d > file size:%d", nbytes, _file_offset, _file_size);
+  uint n = (uint)::read(_fd, buffer, nbytes);
   if (n != nbytes) {
-    log_warning(sca)("Failed to read %d bytes at offset %d from shared code archive file '%s'", (int)nbytes, (int)_file_offset, _archive_path);
+    log_warning(sca)("Failed to read %d bytes at offset %d from shared code archive file '%s'", nbytes, _file_offset, _archive_path);
     failed();
     return 0;
   }
-  log_info(sca)("Read %d bytes at offset %d from shared code archive '%s'", (int)nbytes, (int)_file_offset, _archive_path);
+  log_debug(sca)("Read %d bytes at offset %d from shared code archive '%s'", nbytes, _file_offset, _archive_path);
   _file_offset += n;
   return nbytes;
 }
 
 
-size_t SCAFile::write_bytes(const void* buffer, size_t nbytes) {
+uint SCAFile::write_bytes(const void* buffer, uint nbytes) {
   assert(for_write(), "Archive file is not created");
   if (nbytes == 0) {
     return 0;
   }
-  ssize_t n = os::write(_fd, buffer, (unsigned int)nbytes);
-  if (n < 0 || (size_t)n != nbytes) {
-    log_warning(sca)("Failed to write %d bytes to shared code archive file '%s'", (int)nbytes, _archive_path);
+  uint n = (uint)os::write(_fd, buffer, nbytes);
+  if (n != nbytes) {
+    log_warning(sca)("Failed to write %d bytes to shared code archive file '%s'", nbytes, _archive_path);
     failed();
     return 0;
   }
-  log_info(sca)("Wrote %d bytes at offset %d to shared code archive '%s'", (int)nbytes, (int)_file_offset, _archive_path);
+  log_debug(sca)("Wrote %d bytes at offset %d to shared code archive '%s'", nbytes, _file_offset, _archive_path);
   _file_offset += n;
-  return (size_t)n;
+  return n;
 }
 
 void SCAFile::add_entry(SCAEntry entry) {
@@ -309,23 +312,23 @@ void SCAFile::add_entry(SCAEntry entry) {
   _write_entries->append(entry);
 }
 
-SCAEntry* SCAFile::find_entry(SCAEntry::Kind kind, uint32_t id) {
-  size_t count = _header.entries_count();
+SCAEntry* SCAFile::find_entry(SCAEntry::Kind kind, uint id) {
+  uint count = _header.entries_count();
   if (_entries == nullptr) {
     // Read it
     if (!seek_to_position(_header.entries_offset())) {
       return nullptr;
     }
-    size_t size  = sizeof(SCAEntry);
-    size_t entries_size = count * size; // In bytes
+    uint size  = sizeof(SCAEntry);
+    uint entries_size = count * size; // In bytes
     _entries = NEW_C_HEAP_ARRAY(SCAEntry, count, mtCode);
-    size_t n = read_bytes((void*)&(_entries[0]), entries_size);
+    uint n = read_bytes((void*)&(_entries[0]), entries_size);
     if (n != entries_size) {
       return nullptr;
     }
-    log_info(sca)("Read SCAEntry entries with %d elements at offset %d", (int)count, (int)_header.entries_offset());
+    log_info(sca)("Read %d SCAEntry entries at offset %d from shared code archive '%s'", count, _header.entries_offset(), _archive_path);
   }
-  for(int i = 0; i < (int)count; i++) {
+  for(uint i = 0; i < count; i++) {
     if (_entries[i].kind() == kind && _entries[i].id() == id) {
       assert(_entries[i].idx() == i, "sanity");
       return &(_entries[i]);
@@ -335,29 +338,30 @@ SCAEntry* SCAFile::find_entry(SCAEntry::Kind kind, uint32_t id) {
 }
 
 bool SCAFile::finish_write() {
-  int version = _header.version();
-  size_t entries_offset   = 0; // 0 is deafult if empty
+  uint version = _header.version();
+  uint entries_offset   = 0; // 0 is deafult if empty
   int count   = _write_entries->length();
   if (count > 0) {
     SCAEntry* entries_address = _write_entries->adr_at(0);
     // Write SCAEntry entries
     entries_offset = _file_offset;
-    size_t entries_size = count * sizeof(SCAEntry); // In bytes
-    size_t n = write_bytes((const void*)entries_address, entries_size);
+    uint entries_size = count * sizeof(SCAEntry); // In bytes
+    uint n = write_bytes(entries_address, entries_size);
     if (n != entries_size) {
       return false;
     }
-    log_info(sca)("Wrote SCAEntry entries to shared code archive '%s'", _archive_path);
+    log_info(sca)("Wrote %d SCAEntry entries to shared code archive '%s'", count, _archive_path);
   }
 
   // Finalize and write header
   _header.init(version, count, _file_offset, entries_offset);
+  _file_size = _file_offset;
   if (!seek_to_position(0)) {
     return false;
   }
   _file_offset = 0;
-  size_t header_size = sizeof(SCAHeader);
-  size_t n = write_bytes((const void*)&_header, header_size);
+  uint header_size = sizeof(SCAHeader);
+  uint n = write_bytes((const void*)&_header, header_size);
   if (n != header_size) {
     return false;
   }
@@ -371,19 +375,19 @@ bool SCAFile::load_stub(StubCodeGenerator* cgen, vmIntrinsicID id, const char* n
   if (archive == nullptr) {
     return false;
   }
-  SCAEntry* entry = archive->find_entry(SCAEntry::Stub, (uint32_t)id);
+  SCAEntry* entry = archive->find_entry(SCAEntry::Stub, (uint)id);
   if (entry == nullptr) {
     return false;
   }
-  size_t entry_position = entry->offset();
+  uint entry_position = entry->offset();
   // Read name
-  size_t name_offset = entry_position + entry->name_offset();
-  size_t name_size   = entry->name_size(); // Includes '/0'
+  uint name_offset = entry_position + entry->name_offset();
+  uint name_size   = entry->name_size(); // Includes '/0'
   char*  saved_name  = NEW_C_HEAP_ARRAY(char, name_size, mtCode);
   if (!archive->seek_to_position(name_offset)) {
     return false;
   }
-  size_t n = archive->read_bytes(saved_name, name_size);
+  uint n = archive->read_bytes(saved_name, name_size);
   if (n != name_size) {
     return false;
   }
@@ -393,8 +397,8 @@ bool SCAFile::load_stub(StubCodeGenerator* cgen, vmIntrinsicID id, const char* n
     return false;
   }
   // Read code
-  size_t code_offset = entry_position + entry->code_offset();
-  size_t code_size   = entry->code_size();
+  uint code_offset = entry_position + entry->code_offset();
+  uint code_size   = entry->code_size();
   if (!archive->seek_to_position(code_offset)) {
     return false;
   }
@@ -403,7 +407,7 @@ bool SCAFile::load_stub(StubCodeGenerator* cgen, vmIntrinsicID id, const char* n
     return false;
   }
   cgen->assembler()->code_section()->set_end(start + n);
-  log_info(sca)("Read stub '%s' id:%d from shared code archive '%s'", name, (int)id, archive->_archive_path);
+  log_info(sca,stubs)("Read stub '%s' id:%d from shared code archive '%s'", name, (int)id, archive->_archive_path);
   return true;
 }
 
@@ -415,12 +419,12 @@ bool SCAFile::store_stub(StubCodeGenerator* cgen, vmIntrinsicID id, const char* 
   if (!archive->align_write()) {
     return false;
   }
-  size_t entry_position = archive->_file_offset;
+  uint entry_position = archive->_file_offset;
 
   // Write name
-  size_t name_offset = 0; // Write name first
-  size_t name_size = strlen(name) + 1; // Includes '/0'
-  size_t n = archive->write_bytes(name, name_size);
+  uint name_offset = 0; // Write name first
+  uint name_size = strlen(name) + 1; // Includes '/0'
+  uint n = archive->write_bytes(name, name_size);
   if (n != name_size) {
     return false;
   }
@@ -428,8 +432,8 @@ bool SCAFile::store_stub(StubCodeGenerator* cgen, vmIntrinsicID id, const char* 
     return false;
   }
   // Write code
-  size_t code_offset = archive->_file_offset - entry_position;
-  size_t code_size = cgen->assembler()->pc() - start;
+  uint code_offset = archive->_file_offset - entry_position;
+  uint code_size = cgen->assembler()->pc() - start;
   n = archive->write_bytes(start, code_size);
   if (n != code_size) {
     return false;
@@ -437,19 +441,19 @@ bool SCAFile::store_stub(StubCodeGenerator* cgen, vmIntrinsicID id, const char* 
   SCAEntry entry(entry_position, name_offset, name_size, code_offset, code_size, 0, 0,
                  SCAEntry::Stub, (uint32_t)id, archive->_header.next_idx());
   archive->add_entry(entry);
-  log_info(sca)("Wrote stub '%s' id:%d to shared code archive '%s'", name, (int)id, archive->_archive_path);
+  log_info(sca, stubs)("Wrote stub '%s' id:%d to shared code archive '%s'", name, (int)id, archive->_archive_path);
   return true;
 }
 
 // Repair the pc relative information in the code after load
-bool SCAFile::read_relocations(CodeBuffer* buffer, CodeBuffer* orig_buffer, size_t max_reloc_size) {
+bool SCAFile::read_relocations(CodeBuffer* buffer, CodeBuffer* orig_buffer, uint max_reloc_size) {
   // Read max count
-  size_t max_reloc_count = max_reloc_size / sizeof(relocInfo);
+  uint max_reloc_count = max_reloc_size / sizeof(relocInfo);
   bool success = true;
-  size_t* reloc_data = NEW_C_HEAP_ARRAY(size_t, max_reloc_count, mtCode);
+  uint* reloc_data = NEW_C_HEAP_ARRAY(uint, max_reloc_count, mtCode);
   for (int i = 0; i < (int)CodeBuffer::SECT_LIMIT; i++) {
     int reloc_count = 0;
-    size_t n = read_bytes(&reloc_count, sizeof(int));
+    uint n = read_bytes(&reloc_count, sizeof(int));
     if (n != sizeof(int)) {
       success = false;
       break;
@@ -464,7 +468,7 @@ bool SCAFile::read_relocations(CodeBuffer* buffer, CodeBuffer* orig_buffer, size
       success = false;
       break;
     }
-    size_t reloc_size = reloc_count * sizeof(relocInfo);
+    uint reloc_size = reloc_count * sizeof(relocInfo);
     CodeSection* cs  = buffer->code_section(i);
     if (!cs->has_locs()) {
       cs->initialize_locs(reloc_count);
@@ -478,8 +482,8 @@ bool SCAFile::read_relocations(CodeBuffer* buffer, CodeBuffer* orig_buffer, size
     cs->set_locs_end(reloc_start + (int)reloc_count);
     cs->set_locs_point(cs->start() + locs_point_off);
 
-    // Read additional relocation data: size_t per relocation
-    size_t  data_size  = reloc_count * sizeof(size_t);
+    // Read additional relocation data: uint per relocation
+    uint  data_size  = reloc_count * sizeof(uint);
     n = read_bytes(reloc_data, data_size);
     if (n != data_size) {
       success = false;
@@ -514,7 +518,23 @@ bool SCAFile::read_relocations(CodeBuffer* buffer, CodeBuffer* orig_buffer, size
         case relocInfo::external_word_type: {
           iter.reloc()->fix_relocation_after_move(orig_buffer, buffer);
           address target = _table->address_for_id(reloc_data[j]);
-          ((external_word_Relocation*)iter.reloc())->set_value(target);
+          int data_len = iter.datalen();
+          if (data_len > 0) {
+            // Overwrite RelocInfo embedded address
+            RelocationHolder rh = external_word_Relocation::spec(target);
+            external_word_Relocation* new_reloc = (external_word_Relocation*)rh.reloc();
+            short buf[4] = {0}; // 8 bytes
+            short* p = new_reloc->pack_data_to(buf);
+            if ((p - buf) != data_len) {
+              return false; // New address does not fit into old relocInfo
+            }
+            short* data = iter.data();
+            for (int i = 0; i < data_len; i++) {
+              data[i] = buf[i];
+            }
+          }
+          external_word_Relocation* reloc = (external_word_Relocation*)iter.reloc();
+          reloc->set_value(target); // Patch address in the code
           break;
         }
         case relocInfo::internal_word_type:
@@ -534,7 +554,7 @@ bool SCAFile::read_relocations(CodeBuffer* buffer, CodeBuffer* orig_buffer, size
     }
     assert(j <= (int)reloc_count, "sanity");
   }
-  FREE_C_HEAP_ARRAY(size_t, reloc_data);
+  FREE_C_HEAP_ARRAY(uint, reloc_data);
   return success;
 }
 
@@ -543,15 +563,15 @@ bool SCAFile::read_code(CodeBuffer* buffer, CodeBuffer* orig_buffer) {
   for (int i = 0; i < (int)CodeBuffer::SECT_LIMIT; i++) {
     CodeSection* cs = buffer->code_section(i);
     // Read original section size and address.
-    size_t orig_size = 0;
-    size_t n = read_bytes(&orig_size, sizeof(size_t));
-    if (n != sizeof(size_t)) {
+    uint orig_size = 0;
+    uint n = read_bytes(&orig_size, sizeof(uint));
+    if (n != sizeof(uint)) {
       return false;
     }
     if (i != (int)CodeBuffer::SECT_INSTS) {
       buffer->initialize_section_size(cs, orig_size);
     }
-    if (orig_size > (size_t)cs->capacity()) { // Will not fit
+    if (orig_size > (uint)cs->capacity()) { // Will not fit
       return false;
     }
     if (orig_size == 0) {
@@ -597,23 +617,23 @@ if (UseNewCode2) {
   if (entry == nullptr) {
     return false;
   }
-  size_t entry_position = entry->offset();
+  uint entry_position = entry->offset();
   if (!archive->seek_to_position(entry_position)) {
     return false;
   }
 
   // Read pc_offset
-  size_t n = archive->read_bytes(pc_offset, sizeof(int));
+  uint n = archive->read_bytes(pc_offset, sizeof(int));
   if (n != sizeof(int)) {
     return false;
   }
 
   // Read name
-  size_t name_offset = entry_position + entry->name_offset();
+  uint name_offset = entry_position + entry->name_offset();
   if (!archive->seek_to_position(name_offset)) {
     return false;
   }
-  size_t name_size   = entry->name_size(); // Includes '/0'
+  uint name_size   = entry->name_size(); // Includes '/0'
   char*  name        = NEW_C_HEAP_ARRAY(char, name_size, mtCode);
   n = archive->read_bytes(name, name_size);
   if (n != name_size) {
@@ -626,7 +646,7 @@ if (UseNewCode2) {
     return false;
   }
 
-  size_t code_offset = entry_position + entry->code_offset();
+  uint code_offset = entry_position + entry->code_offset();
   if (!archive->seek_to_position(code_offset)) {
     return false;
   }
@@ -640,7 +660,7 @@ if (UseNewCode2) {
   }
 
   // Read relocations
-  size_t reloc_offset = entry_position + entry->reloc_offset();
+  uint reloc_offset = entry_position + entry->reloc_offset();
   if (!archive->seek_to_position(reloc_offset)) {
     return false;
   }
@@ -648,7 +668,7 @@ if (UseNewCode2) {
     return false;
   }
 
-  log_info(sca)("Read blob '%s' from shared code archive '%s'", name, archive->_archive_path);
+  log_info(sca, stubs)("Read blob '%s' from shared code archive '%s'", name, archive->_archive_path);
 #ifdef ASSERT
 if (UseNewCode2) {
   FlagSetting fs(PrintRelocations, true);
@@ -660,22 +680,22 @@ if (UseNewCode2) {
   return true;
 }
 
-bool SCAFile::write_relocations(CodeBuffer* buffer, size_t& max_reloc_size) {
-  size_t max_reloc_count = 0;
+bool SCAFile::write_relocations(CodeBuffer* buffer, uint& max_reloc_size) {
+  uint max_reloc_count = 0;
   for (int i = 0; i < (int)CodeBuffer::SECT_LIMIT; i++) {
     CodeSection* cs = buffer->code_section(i);
-    size_t reloc_count = cs->has_locs() ? cs->locs_count() : 0;
+    uint reloc_count = cs->has_locs() ? cs->locs_count() : 0;
     if (reloc_count > max_reloc_count) {
       max_reloc_count = reloc_count;
     }
   }
   max_reloc_size = max_reloc_count * sizeof(relocInfo);
   bool success = true;
-  size_t* reloc_data = NEW_C_HEAP_ARRAY(size_t, max_reloc_count, mtCode);
+  uint* reloc_data = NEW_C_HEAP_ARRAY(uint, max_reloc_count, mtCode);
   for (int i = 0; i < (int)CodeBuffer::SECT_LIMIT; i++) {
     CodeSection* cs = buffer->code_section(i);
     int reloc_count = cs->has_locs() ? cs->locs_count() : 0;
-    size_t n = write_bytes(&reloc_count, sizeof(int));
+    uint n = write_bytes(&reloc_count, sizeof(int));
     if (n != sizeof(int)) {
       success = false;
       break;
@@ -691,7 +711,7 @@ bool SCAFile::write_relocations(CodeBuffer* buffer, size_t& max_reloc_size) {
       break;
     }
     relocInfo* reloc_start = cs->locs_start();
-    size_t reloc_size      = reloc_count * sizeof(relocInfo);
+    uint reloc_size      = reloc_count * sizeof(relocInfo);
     n = write_bytes(reloc_start, reloc_size);
     if (n != reloc_size) {
       success = false;
@@ -744,26 +764,26 @@ bool SCAFile::write_relocations(CodeBuffer* buffer, size_t& max_reloc_size) {
       j++;
     }
     assert(j <= (int)reloc_count, "sanity");
-    // Write additional relocation data: size_t per relocation
-    size_t data_size = reloc_count * sizeof(size_t);
+    // Write additional relocation data: uint per relocation
+    uint data_size = reloc_count * sizeof(uint);
     n = write_bytes(reloc_data, data_size);
     if (n != data_size) {
       success = false;
       break;
     }
   }
-  FREE_C_HEAP_ARRAY(size_t, reloc_data);
+  FREE_C_HEAP_ARRAY(uint, reloc_data);
   return success;
 }
 
-bool SCAFile::write_code(CodeBuffer* buffer, size_t& code_size) {
+bool SCAFile::write_code(CodeBuffer* buffer, uint& code_size) {
   assert(buffer->blob() != nullptr, "sanity");
-  size_t total_size = 0;
+  uint total_size = 0;
   for (int i = 0; i < (int)CodeBuffer::SECT_LIMIT; i++) {
     const CodeSection* cs = buffer->code_section(i);
-    size_t cs_size = cs->size();
-    size_t n = write_bytes(&cs_size, sizeof(size_t));
-    if (n != sizeof(size_t)) {
+    uint cs_size = (uint)cs->size();
+    uint n = write_bytes(&cs_size, sizeof(uint));
+    if (n != sizeof(uint)) {
       return false;
     }
     if (cs_size == 0) {
@@ -804,18 +824,18 @@ if (UseNewCode2) {
   if (!archive->align_write()) {
     return false;
   }
-  size_t entry_position = archive->_file_offset;
+  uint entry_position = archive->_file_offset;
 
   // Write pc_offset
-  size_t n = archive->write_bytes(&pc_offset, sizeof(int));
+  uint n = archive->write_bytes(&pc_offset, sizeof(int));
   if (n != sizeof(int)) {
     return false;
   }
 
   // Write name
   const char* name = buffer->name();
-  size_t name_offset = archive->_file_offset  - entry_position;
-  size_t name_size = strlen(name) + 1; // Includes '/0'
+  uint name_offset = archive->_file_offset  - entry_position;
+  uint name_size = strlen(name) + 1; // Includes '/0'
   n = archive->write_bytes(name, name_size);
   if (n != name_size) {
     return false;
@@ -825,14 +845,14 @@ if (UseNewCode2) {
   }
 
   // Write code section
-  size_t code_offset = archive->_file_offset - entry_position;
-  size_t code_size = 0;
+  uint code_offset = archive->_file_offset - entry_position;
+  uint code_size = 0;
   if (!archive->write_code(buffer, code_size)) {
     return false;
   }
   // Write relocInfo array
-  size_t reloc_offset = archive->_file_offset - entry_position;
-  size_t reloc_size = 0;
+  uint reloc_offset = archive->_file_offset - entry_position;
+  uint reloc_size = 0;
   if (!archive->write_relocations(buffer, reloc_size)) {
     return false;
   }
@@ -841,13 +861,13 @@ if (UseNewCode2) {
                  code_offset, code_size, reloc_offset, reloc_size,
                  SCAEntry::Blob, (uint32_t)999, archive->_header.next_idx());
   archive->add_entry(entry);
-  log_info(sca)("Wrote stub '%s' to shared code archive '%s'", name, archive->_archive_path);
+  log_info(sca, stubs)("Wrote stub '%s' to shared code archive '%s'", name, archive->_archive_path);
   return true;
 }
 
 DebugInformationRecorder* SCAFile::read_debug_info(OopRecorder* oop_recorder) {
   int data_size = 0;
-  size_t n = read_bytes(&data_size, sizeof(int));
+  uint n = read_bytes(&data_size, sizeof(int));
   if (n != sizeof(int)) {
     return nullptr;
   }
@@ -860,12 +880,12 @@ DebugInformationRecorder* SCAFile::read_debug_info(OopRecorder* oop_recorder) {
   DebugInformationRecorder* recorder = new DebugInformationRecorder(oop_recorder, data_size, pcs_length);
 
   n = read_bytes(recorder->stream()->buffer(), data_size);
-  if (n != (size_t)data_size) {
+  if (n != (uint)data_size) {
     return nullptr;
   }
   recorder->stream()->set_position(data_size);
 
-  size_t pcs_size = pcs_length * sizeof(PcDesc);
+  uint pcs_size = pcs_length * sizeof(PcDesc);
   n = read_bytes(recorder->pcs(), pcs_size);
   if (n != pcs_size) {
     return nullptr;
@@ -875,7 +895,7 @@ DebugInformationRecorder* SCAFile::read_debug_info(OopRecorder* oop_recorder) {
 
 bool SCAFile::write_debug_info(DebugInformationRecorder* recorder) {
   int data_size = recorder->data_size(); // In bytes
-  size_t n = write_bytes(&data_size, sizeof(int));
+  uint n = write_bytes(&data_size, sizeof(int));
   if (n != sizeof(int)) {
     return false;
   }
@@ -885,10 +905,10 @@ bool SCAFile::write_debug_info(DebugInformationRecorder* recorder) {
     return false;
   }
   n = write_bytes(recorder->stream()->buffer(), data_size);
-  if (n != (size_t)data_size) {
+  if (n != (uint)data_size) {
     return false;
   }
-  size_t pcs_size = pcs_length * sizeof(PcDesc);
+  uint pcs_size = pcs_length * sizeof(PcDesc);
   n = write_bytes(recorder->pcs(), pcs_size);
   if (n != pcs_size) {
     return false;
@@ -897,8 +917,8 @@ bool SCAFile::write_debug_info(DebugInformationRecorder* recorder) {
 }
 
 bool SCAFile::read_oop_maps(OopMapSet* oop_maps) {
-  size_t om_count = 0;
-  size_t n = read_bytes(&om_count, sizeof(int));
+  uint om_count = 0;
+  uint n = read_bytes(&om_count, sizeof(int));
   if (n != sizeof(int)) {
     return false;
   }
@@ -919,8 +939,8 @@ bool SCAFile::read_oop_maps(OopMapSet* oop_maps) {
       return false;
     }
     oop_map->set_write_stream(stream);
-    n = read_bytes(oop_map->data(), (size_t)data_size);
-    if (n != (size_t)data_size) {
+    n = read_bytes(oop_map->data(), (uint)data_size);
+    if (n != (uint)data_size) {
       return false;
     }
     oop_maps->add(oop_map);
@@ -929,8 +949,8 @@ bool SCAFile::read_oop_maps(OopMapSet* oop_maps) {
 }
 
 bool SCAFile::write_oop_maps(OopMapSet* oop_maps) {
-  size_t om_count = oop_maps->size();
-  size_t n = write_bytes(&om_count, sizeof(int));
+  uint om_count = oop_maps->size();
+  uint n = write_bytes(&om_count, sizeof(int));
   if (n != sizeof(int)) {
     return false;
   }
@@ -945,8 +965,8 @@ bool SCAFile::write_oop_maps(OopMapSet* oop_maps) {
     if (n != sizeof(OopMap)) {
       return false;
     }
-    n = write_bytes(om->data(), (size_t)data_size);
-    if (n != (size_t)data_size) {
+    n = write_bytes(om->data(), (uint)data_size);
+    if (n != (uint)data_size) {
       return false;
     }
   }
@@ -955,7 +975,7 @@ bool SCAFile::write_oop_maps(OopMapSet* oop_maps) {
 
 bool SCAFile::read_metadata(OopRecorder* oop_recorder, ciMethod* target) {
   int metadata_count = 0;
-  size_t n = read_bytes(&metadata_count, sizeof(int));
+  uint n = read_bytes(&metadata_count, sizeof(int));
   if (n != sizeof(int)) {
     return false;
   }
@@ -996,7 +1016,7 @@ bool SCAFile::read_metadata(OopRecorder* oop_recorder, ciMethod* target) {
         int total_length = holder_length + 1 + name_length + 1 + signat_length + 1;
         char* dest = NEW_RESOURCE_ARRAY(char, total_length);
         n = read_bytes(dest, total_length);
-        if (n != (size_t)total_length) {
+        if (n != (uint)total_length) {
           return false;
         }
         TempNewSymbol klass_sym = SymbolTable::probe(&(dest[0]), holder_length);
@@ -1047,7 +1067,7 @@ bool SCAFile::read_metadata(OopRecorder* oop_recorder, ciMethod* target) {
 
 bool SCAFile::write_metadata(OopRecorder* oop_recorder, const methodHandle& comp_method) {
   int metadata_count = oop_recorder->metadata_count();
-  size_t n = write_bytes(&metadata_count, sizeof(int));
+  uint n = write_bytes(&metadata_count, sizeof(int));
   if (n != sizeof(int)) {
     return false;
   }
@@ -1098,7 +1118,7 @@ bool SCAFile::write_metadata(OopRecorder* oop_recorder, const methodHandle& comp
           return false;
         }
         n = write_bytes(dest, total_length);
-        if (n != (size_t)total_length) {
+        if (n != (uint)total_length) {
           return false;
         }
         log_info(sca)("Write metadata [%d]: %s", i, dest);
@@ -1125,23 +1145,23 @@ bool SCAFile::load_nmethod(ciEnv* env, ciMethod* target, int entry_bci, Abstract
     return false;
   }
   int compile_id = env->compile_id();
-  SCAEntry* entry = archive->find_entry(SCAEntry::Code, (uint32_t)compile_id);
+  SCAEntry* entry = archive->find_entry(SCAEntry::Code, (uint)compile_id);
   if (entry == nullptr) {
     return false;
   }
-  size_t entry_position = entry->offset();
+  uint entry_position = entry->offset();
   if (!archive->seek_to_position(entry_position)) {
     return false;
   }
 
   // Read name
-  size_t name_offset = entry_position + entry->name_offset();
+  uint name_offset = entry_position + entry->name_offset();
   if (!archive->seek_to_position(name_offset)) {
     return false;
   }
-  size_t name_size   = entry->name_size(); // Includes '/0'
+  uint name_size   = entry->name_size(); // Includes '/0'
   char*  name        = NEW_C_HEAP_ARRAY(char, name_size, mtCode);
-  size_t n = archive->read_bytes(name, name_size);
+  uint n = archive->read_bytes(name, name_size);
   if (n != name_size) {
     FREE_C_HEAP_ARRAY(char, name);
     return false;
@@ -1159,7 +1179,7 @@ bool SCAFile::load_nmethod(ciEnv* env, ciMethod* target, int entry_bci, Abstract
     }
   }
 
-  size_t code_offset = entry_position + entry->code_offset();
+  uint code_offset = entry_position + entry->code_offset();
   if (!archive->seek_to_position(code_offset)) {
     return false;
   }
@@ -1219,7 +1239,7 @@ bool SCAFile::load_nmethod(ciEnv* env, ciMethod* target, int entry_bci, Abstract
   if (dependencies_size) {
     u_char* dependencies_buffer = NEW_RESOURCE_ARRAY(u_char, dependencies_size);
     n = archive->read_bytes(dependencies_buffer, dependencies_size);
-    if (n != (size_t)dependencies_size) {
+    if (n != (uint)dependencies_size) {
       return false;
     }
     dependencies->set_content(dependencies_buffer, dependencies_size);
@@ -1241,7 +1261,7 @@ bool SCAFile::load_nmethod(ciEnv* env, ciMethod* target, int entry_bci, Abstract
   ExceptionHandlerTable handler_table(MAX2(exc_table_length, 4));
   if (exc_table_length > 0) {
     handler_table.set_length(exc_table_length);
-    size_t exc_table_size = handler_table.size_in_bytes();
+    uint exc_table_size = handler_table.size_in_bytes();
     n = archive->read_bytes(handler_table.table(), exc_table_size);
     if (n != exc_table_size) {
       return false;
@@ -1258,7 +1278,7 @@ bool SCAFile::load_nmethod(ciEnv* env, ciMethod* target, int entry_bci, Abstract
   if (nul_chk_length > 0) {
     nul_chk_table.set_size(nul_chk_length);
     nul_chk_table.set_len(nul_chk_length);
-    size_t nul_chk_size = nul_chk_table.size_in_bytes();
+    uint nul_chk_size = nul_chk_table.size_in_bytes();
     n = archive->read_bytes(nul_chk_table.data(), nul_chk_size);
     if (n != nul_chk_size) {
       return false;
@@ -1277,7 +1297,7 @@ bool SCAFile::load_nmethod(ciEnv* env, ciMethod* target, int entry_bci, Abstract
   }
 
   // Read relocations
-  size_t reloc_offset = entry_position + entry->reloc_offset();
+  uint reloc_offset = entry_position + entry->reloc_offset();
   if (!archive->seek_to_position(reloc_offset)) {
     return false;
   }
@@ -1285,7 +1305,7 @@ bool SCAFile::load_nmethod(ciEnv* env, ciMethod* target, int entry_bci, Abstract
     return false;
   }
 
-  log_info(sca)("Read nmethod '%s' from shared code archive '%s'", name, archive->_archive_path);
+  log_info(sca, nmethod)("Read nmethod '%s' from shared code archive '%s'", name, archive->_archive_path);
 #ifdef ASSERT
 if (UseNewCode3) {
   FlagSetting fs(PrintRelocations, true);
@@ -1294,6 +1314,8 @@ if (UseNewCode3) {
 }
 #endif
   FREE_C_HEAP_ARRAY(char, name);
+
+  if (!UseNewCode) return false;
 
   // Register nmethod
   env->register_method(target, entry_bci,
@@ -1346,19 +1368,19 @@ if (UseNewCode3) {
   if (!archive->align_write()) {
     return false;
   }
-  size_t entry_position = archive->_file_offset;
+  uint entry_position = archive->_file_offset;
 
   assert(entry_bci == InvocationEntryBci, "No OSR");
 
   // Write name
-  size_t name_offset = 0;
-  size_t name_size   = 0;
-  size_t n;
+  uint name_offset = 0;
+  uint name_size   = 0;
+  uint n;
   {
     ResourceMark rm;
     const char* name   = method->name_and_sig_as_C_string();
     name_offset = archive->_file_offset  - entry_position;
-    name_size   = strlen(name) + 1; // Includes '/0'
+    name_size   = (uint)strlen(name) + 1; // Includes '/0'
     n = archive->write_bytes(name, name_size);
     if (n != name_size) {
       return false;
@@ -1369,7 +1391,7 @@ if (UseNewCode3) {
     return false;
   }
 
-  size_t code_offset = archive->_file_offset - entry_position;
+  uint code_offset = archive->_file_offset - entry_position;
 
   int flags = (has_unsafe_access << 16) | (has_wide_vectors << 8) | has_monitors;
   n = archive->write_bytes(&flags, sizeof(int));
@@ -1410,7 +1432,7 @@ if (UseNewCode3) {
     return false;
   }
   n = archive->write_bytes(dependencies->content_bytes(), dependencies_size);
-  if (n != (size_t)dependencies_size) {
+  if (n != (uint)dependencies_size) {
     return false;
   }
 
@@ -1425,7 +1447,7 @@ if (UseNewCode3) {
   if (n != sizeof(int)) {
     return false;
   }
-  size_t exc_table_size = handler_table->size_in_bytes();
+  uint exc_table_size = handler_table->size_in_bytes();
   n = archive->write_bytes(handler_table->table(), exc_table_size);
   if (n != exc_table_size) {
     return false;
@@ -1437,20 +1459,20 @@ if (UseNewCode3) {
   if (n != sizeof(int)) {
     return false;
   }
-  size_t nul_chk_size = nul_chk_table->size_in_bytes();
+  uint nul_chk_size = nul_chk_table->size_in_bytes();
   n = archive->write_bytes(nul_chk_table->data(), nul_chk_size);
   if (n != nul_chk_size) {
     return false;
   }
 
   // Write code section
-  size_t code_size = 0;
+  uint code_size = 0;
   if (!archive->write_code(buffer, code_size)) {
     return false;
   }
   // Write relocInfo array
-  size_t reloc_offset = archive->_file_offset - entry_position;
-  size_t reloc_size = 0;
+  uint reloc_offset = archive->_file_offset - entry_position;
+  uint reloc_size = 0;
   if (!archive->write_relocations(buffer, reloc_size)) {
     return false;
   }
@@ -1462,7 +1484,7 @@ if (UseNewCode3) {
   {
     ResourceMark rm;
     const char* name   = method->name_and_sig_as_C_string();
-    log_info(sca)("Wrote nmethod '%s' to shared code archive '%s'", name, archive->_archive_path);
+    log_info(sca, nmethod)("Wrote nmethod '%s' to shared code archive '%s'", name, archive->_archive_path);
   }
   return true;
 }
@@ -1543,8 +1565,8 @@ SCATable::~SCATable() {
   }
 }
 
-int search_address(address addr, address* table, int length) {
-  for (int i = 0; i < length; i++) {
+int search_address(address addr, address* table, uint length) {
+  for (int i = 0; i < (int)length; i++) {
     if (table[i] == addr) {
       return i;
     }
@@ -1552,12 +1574,12 @@ int search_address(address addr, address* table, int length) {
   return -1;
 }
 
-address SCATable::address_for_id(size_t idx) {
+address SCATable::address_for_id(int idx) {
   if (!_complete) {
     fatal("SCA table is not complete");
   }
-  int id = (int)idx;
-  if (id < 0 || id == (_extrs_length + _stubs_length + _blobs_length)) {
+  uint id = (uint)idx;
+  if (idx < 0 || id == (_extrs_length + _stubs_length + _blobs_length)) {
     fatal("Incorrect id %d for SCA table", id);
   }
   if (id > (_extrs_length + _stubs_length + _blobs_length)) {
@@ -1577,7 +1599,7 @@ address SCATable::address_for_id(size_t idx) {
   return nullptr;
 }
 
-size_t SCATable::id_for_address(address addr) {
+int SCATable::id_for_address(address addr) {
   int id = -1;
   if (!_complete) {
     fatal("SCA table is not complete");
@@ -1616,9 +1638,9 @@ size_t SCATable::id_for_address(address addr) {
         if (os::dll_address_to_function_name(addr, func_name, buflen, &offset)) {
           if (offset > 0) {
             // Could be address of C string
-            log_info(sca)("Address " INTPTR_FORMAT " for runtime target '%s' is missing in SCA table", p2i(addr), (const char*)addr);
-            size_t dist = (size_t)pointer_delta(addr, (address)os::init, 1);
-            assert(dist > (size_t)(_extrs_length + _stubs_length + _blobs_length), "change encoding of distance");
+            uint dist = (uint)pointer_delta(addr, (address)os::init, 1);
+            log_info(sca)("Address " INTPTR_FORMAT " (offset %d) for runtime target '%s' is missing in SCA table", p2i(addr), dist, (const char*)addr);
+            assert(dist > (uint)(_extrs_length + _stubs_length + _blobs_length), "change encoding of distance");
             return dist;
           }
           fatal("Address " INTPTR_FORMAT " for runtime target '%s+%d' is missing in SCA table", p2i(addr), func_name, offset);
@@ -1628,5 +1650,5 @@ size_t SCATable::id_for_address(address addr) {
       }
     }
   }
-  return (size_t)id;
+  return id;
 }

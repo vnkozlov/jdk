@@ -1332,6 +1332,7 @@ class external_word_Relocation : public DataRelocation {
   // in the code stream.  See external_word_Relocation::target().
   void pack_data_to(CodeSection* dest) override;
   void unpack_data() override;
+  short* pack_data_to(short* p); // Pack address into buffer
 
   void fix_relocation_after_move(const CodeBuffer* src, CodeBuffer* dest) override;
   address  target();        // if _target==nullptr, fetch addr from code stream

@@ -47,25 +47,25 @@ enum class vmIntrinsicID : int;
 class SCAHeader {
 private:
   // Here should be version and other verification fields
-  uint   _version;           // JDK version (should match when reading archive)
-  int    _entries_count;     // number of recorded entries in archive
-  size_t _archive_size;      // archive size in bytes
-  size_t _entries_offset;    // offset of SCAEntry array describing entries
+  uint _version;           // JDK version (should match when reading archive)
+  uint _entries_count;     // number of recorded entries in archive
+  uint _archive_size;      // archive size in bytes
+  uint _entries_offset;    // offset of SCAEntry array describing entries
 
 public:
-  void init(uint version, int count, size_t archive_size, size_t entries_offset) {
+  void init(uint version, int count, uint archive_size, uint entries_offset) {
     _version        = version;
     _entries_count  = count;
     _archive_size   = archive_size;
     _entries_offset = entries_offset;
   }
 
-  uint   version()        const { return _version; }
-  int    entries_count()  const { return _entries_count; }
-  int    next_idx()             { return _entries_count++; }
+  uint version()        const { return _version; }
+  uint entries_count()  const { return _entries_count; }
+  uint next_idx()             { return _entries_count++; }
 
-  size_t archive_size()   const { return _archive_size; }
-  size_t entries_offset() const { return _entries_offset; }
+  uint archive_size()   const { return _archive_size; }
+  uint entries_offset() const { return _entries_offset; }
 };
 
 // Archive's entry contain information from CodeBuffer
@@ -79,22 +79,22 @@ public:
   };
 
 private:
-  size_t   _offset; // Offset to entry [first constans then code]
-  size_t   _name_offset; // Method's or intrinsic name
-  size_t   _name_size;
-  size_t   _code_offset; // Start of code in archive
-  size_t   _code_size;   // Total size of all code sections
-  size_t   _reloc_offset;// Relocations
-  size_t   _reloc_size;  // Max size of relocations per code section
-  Kind     _kind;   // 1:stub, 2:blob, 3:nmethod
-  uint32_t _id;     // vmIntrinsic::ID for stub or 0 for nmethod
-  int      _idx;    // Sequential index in archive (< SCAHeader::_entries_count)
+  uint   _offset; // Offset to entry
+  uint   _name_offset; // Method's or intrinsic name
+  uint   _name_size;
+  uint   _code_offset; // Start of code in archive
+  uint   _code_size;   // Total size of all code sections
+  uint   _reloc_offset;// Relocations
+  uint   _reloc_size;  // Max size of relocations per code section
+  Kind   _kind;   // 1:stub, 2:blob, 3:nmethod
+  uint   _id;     // vmIntrinsic::ID for stub or 0 for nmethod
+  uint   _idx;    // Sequential index in archive (< SCAHeader::_entries_count)
 
 public:
-  SCAEntry(size_t offset, size_t name_offset, size_t name_size,
-           size_t code_offset, size_t code_size,
-           size_t reloc_offset, size_t reloc_size,
-           Kind kind, uint32_t id, int idx) {
+  SCAEntry(uint offset, uint name_offset, uint name_size,
+           uint code_offset, uint code_size,
+           uint reloc_offset, uint reloc_size,
+           Kind kind, uint id, uint idx) {
     _offset       = offset;
     _name_offset  = name_offset;
     _name_size    = name_size;
@@ -120,16 +120,16 @@ public:
     _idx  = 0;
   }
 
-  size_t   offset()       const { return _offset; }
-  size_t   name_offset()  const { return _name_offset; }
-  size_t   name_size()    const { return _name_size; }
-  size_t   code_offset()  const { return _code_offset; }
-  size_t   code_size()    const { return _code_size; }
-  size_t   reloc_offset() const { return _reloc_offset; }
-  size_t   reloc_size()   const { return _reloc_size; }
-  Kind     kind()         const { return _kind; }
-  uint32_t id()           const { return _id; }
-  int      idx()          const { return _idx; }
+  uint offset()       const { return _offset; }
+  uint name_offset()  const { return _name_offset; }
+  uint name_size()    const { return _name_size; }
+  uint code_offset()  const { return _code_offset; }
+  uint code_size()    const { return _code_size; }
+  uint reloc_offset() const { return _reloc_offset; }
+  uint reloc_size()   const { return _reloc_size; }
+  Kind kind()         const { return _kind; }
+  uint id()           const { return _id; }
+  uint idx()          const { return _idx; }
 };
 
 // Addresses of stubs, blobs and runtime finctions called from compiled code.
@@ -138,9 +138,9 @@ private:
   address* _extrs_addr;
   address* _stubs_addr;
   address* _blobs_addr;
-  int      _extrs_length;
-  int      _stubs_length;
-  int      _blobs_length;
+  uint     _extrs_length;
+  uint     _stubs_length;
+  uint     _blobs_length;
 
   bool _complete;
 public:
@@ -148,16 +148,16 @@ public:
   ~SCATable();
   void init();
   void init_opto();
-  size_t id_for_address(address addr);
-  address address_for_id(size_t id);
+  int  id_for_address(address addr);
+  address address_for_id(int id);
 };
 
 class SCAFile : public CHeapObj<mtCode> {
 private:
   SCAHeader   _header;
   const char* _archive_path;
-  int64_t     _file_size;    // Used when reading archive
-  size_t      _file_offset;  // Used when writing archive
+  uint        _file_size;    // Used when reading archive
+  uint        _file_offset;
   int  _fd;                  // _fd == -1 - file is closed
   bool _for_read;
   bool _failed;
@@ -173,22 +173,22 @@ private:
   static SCAFile* open_for_read();
   static SCAFile* open_for_write();
 
-  bool   seek_to_position(size_t pos);
-  bool   align_write();
-  size_t read_bytes(void* buffer, size_t nbytes);
-  size_t write_bytes(const void* buffer, size_t nbytes);
+  bool seek_to_position(uint pos);
+  bool align_write();
+  uint read_bytes(void* buffer, uint nbytes);
+  uint write_bytes(const void* buffer, uint nbytes);
 
   void failed() { _failed = true; }
 
 public:
-  SCAFile(const char* archive_path, int fd, size_t file_size, bool for_read);
+  SCAFile(const char* archive_path, int fd, uint file_size, bool for_read);
   ~SCAFile();
   static void init_table();
   static void init_opto_table();
   int fd() const { return _fd; }
 
   void add_entry(SCAEntry entry);
-  SCAEntry* find_entry(SCAEntry::Kind kind, uint32_t id);
+  SCAEntry* find_entry(SCAEntry::Kind kind, uint id);
 
   bool finish_write();
 
@@ -196,9 +196,9 @@ public:
   static bool store_stub(StubCodeGenerator* cgen, vmIntrinsicID id, const char* name, address start);
 
   bool read_code(CodeBuffer* buffer, CodeBuffer* orig_buffer);
-  bool read_relocations(CodeBuffer* buffer, CodeBuffer* orig_buffer, size_t reloc_size);
-  bool write_code(CodeBuffer* buffer, size_t& code_size);
-  bool write_relocations(CodeBuffer* buffer, size_t& reloc_size);
+  bool read_relocations(CodeBuffer* buffer, CodeBuffer* orig_buffer, uint reloc_size);
+  bool write_code(CodeBuffer* buffer, uint& code_size);
+  bool write_relocations(CodeBuffer* buffer, uint& reloc_size);
   DebugInformationRecorder* read_debug_info(OopRecorder* oop_recorder);
   bool write_debug_info(DebugInformationRecorder* recorder);
   bool read_oop_maps(OopMapSet* oop_maps);

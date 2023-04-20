@@ -479,19 +479,21 @@ void trampoline_stub_Relocation::unpack_data() {
   _owner = address_from_scaled_offset(unpack_1_int(), base);
 }
 
-void external_word_Relocation::pack_data_to(CodeSection* dest) {
-  short* p = (short*) dest->locs_end();
+short* external_word_Relocation::pack_data_to(short* p) {
 #ifndef _LP64
-  p = pack_1_int_to(p, (int32_t) (intptr_t)_target);
+  return pack_1_int_to(p, (int32_t) (intptr_t)_target);
 #else
   jlong t = (jlong) _target;
   int32_t lo = low(t);
   int32_t hi = high(t);
-  p = pack_2_ints_to(p, lo, hi);
+  return pack_2_ints_to(p, lo, hi);
 #endif /* _LP64 */
-  dest->set_locs_end((relocInfo*) p);
 }
 
+void external_word_Relocation::pack_data_to(CodeSection* dest) {
+  short* p = (short*) dest->locs_end();
+  dest->set_locs_end((relocInfo*)pack_data_to(p));
+}
 
 void external_word_Relocation::unpack_data() {
 #ifndef _LP64
