@@ -1047,7 +1047,7 @@ void ciEnv::register_method(ciMethod* target,
                             bool has_monitors,
                             int immediate_oops_patched,
                             RTMState  rtm_state,
-                            bool is_shared) {
+                            SCAEntry* sca_entry) {
   VM_ENTRY_MARK;
   nmethod* nm = nullptr;
   {
@@ -1092,7 +1092,7 @@ void ciEnv::register_method(ciMethod* target,
       record_failure("method holder is in error state");
     }
 
-    if (!failing() && !is_shared) {
+    if (!failing() && (sca_entry == nullptr)) {
       if (log() != nullptr) {
         // Log the dependencies which this compilation declares.
         dependencies()->log_all_dependencies();
@@ -1130,7 +1130,7 @@ void ciEnv::register_method(ciMethod* target,
     assert(offsets->value(CodeOffsets::Deopt) != -1, "must have deopt entry");
     assert(offsets->value(CodeOffsets::Exceptions) != -1, "must have exception entry");
 
-    if (!is_shared) {
+    if (sca_entry == nullptr) { // Loaded shared code has finalize oops already
       code_buffer->finalize_oop_references(method);
     }
     if (rtm_state == NoRTM) {
@@ -1155,7 +1155,7 @@ void ciEnv::register_method(ciMethod* target,
                                debug_info(), dependencies(), code_buffer,
                                frame_words, oop_map_set,
                                handler_table, inc_table,
-                               compiler, CompLevel(task()->comp_level()));
+                               compiler, CompLevel(task()->comp_level()), sca_entry);
 
     // Free codeBlobs
     code_buffer->free_blob();

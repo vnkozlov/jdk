@@ -31,6 +31,7 @@
 #include "code/nativeInst.hpp"
 #include "code/nmethod.hpp"
 #include "code/scopeDesc.hpp"
+#include "code/SCArchive.hpp"
 #include "compiler/abstractCompiler.hpp"
 #include "compiler/compilationLog.hpp"
 #include "compiler/compileBroker.hpp"
@@ -547,6 +548,7 @@ nmethod* nmethod::new_nmethod(const methodHandle& method,
   ImplicitExceptionTable* nul_chk_table,
   AbstractCompiler* compiler,
   CompLevel comp_level
+  , SCAEntry* sca_entry
 #if INCLUDE_JVMCI
   , char* speculations,
   int speculations_len,
@@ -557,9 +559,6 @@ nmethod* nmethod::new_nmethod(const methodHandle& method,
 )
 {
   assert(debug_info->oop_recorder() == code_buffer->oop_recorder(), "shared OR");
-  if (compiler->is_jvmci()) {
-    code_buffer->finalize_oop_references(method);
-  }
   // create nmethod
   nmethod* nm = nullptr;
 #if INCLUDE_JVMCI
@@ -587,6 +586,7 @@ nmethod* nmethod::new_nmethod(const methodHandle& method,
             nul_chk_table,
             compiler,
             comp_level
+            , sca_entry
 #if INCLUDE_JVMCI
             , speculations,
             speculations_len,
@@ -678,6 +678,7 @@ nmethod::nmethod(
     _exception_offset        = 0;
     _orig_pc_offset          = 0;
     _gc_epoch                = CodeCache::gc_epoch();
+    _sca_entry               = nullptr;
 
     _consts_offset           = content_offset()      + code_buffer->total_offset_of(code_buffer->consts());
     _stub_offset             = content_offset()      + code_buffer->total_offset_of(code_buffer->stubs());
@@ -794,6 +795,7 @@ nmethod::nmethod(
   ImplicitExceptionTable* nul_chk_table,
   AbstractCompiler* compiler,
   CompLevel comp_level
+  , SCAEntry* sca_entry
 #if INCLUDE_JVMCI
   , char* speculations,
   int speculations_len,
@@ -820,6 +822,7 @@ nmethod::nmethod(
     _comp_level              = comp_level;
     _orig_pc_offset          = orig_pc_offset;
     _gc_epoch                = CodeCache::gc_epoch();
+    _sca_entry               = sca_entry;
 
     // Section offsets
     _consts_offset           = content_offset()      + code_buffer->total_offset_of(code_buffer->consts());
@@ -1392,6 +1395,9 @@ bool nmethod::make_not_entrant() {
 
     // Remove nmethod from method.
     unlink_from_method();
+
+    // Invalidate shared code
+    SCArchive::invalidate(_sca_entry);
 
   } // leave critical region under CompiledMethod_lock
 

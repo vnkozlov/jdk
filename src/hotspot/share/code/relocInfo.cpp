@@ -870,8 +870,8 @@ void RelocIterator::print_current() {
         raw_oop   = *oop_addr;
         oop_value = r->oop_value();
       }
-      tty->print(" | [oop_addr=" INTPTR_FORMAT " *=" INTPTR_FORMAT " offset=%d]",
-                 p2i(oop_addr), p2i(raw_oop), r->offset());
+      tty->print(" | [oop_addr=" INTPTR_FORMAT " *=" INTPTR_FORMAT " index=%d offset=%d]",
+                 p2i(oop_addr), p2i(raw_oop), r->oop_index(), r->offset());
       // Do not print the oop by default--we want this routine to
       // work even during GC or other inconvenient times.
       if (WizardMode && oop_value != nullptr) {
@@ -893,8 +893,8 @@ void RelocIterator::print_current() {
         raw_metadata   = *metadata_addr;
         metadata_value = r->metadata_value();
       }
-      tty->print(" | [metadata_addr=" INTPTR_FORMAT " *=" INTPTR_FORMAT " offset=%d]",
-                 p2i(metadata_addr), p2i(raw_metadata), r->offset());
+      tty->print(" | [metadata_addr=" INTPTR_FORMAT " *=" INTPTR_FORMAT " index=%d offset=%d]",
+                 p2i(metadata_addr), p2i(raw_metadata), r->metadata_index(), r->offset());
       if (metadata_value != nullptr) {
         tty->print("metadata_value=" INTPTR_FORMAT ": ", p2i(metadata_value));
         metadata_value->print_value_on(tty);

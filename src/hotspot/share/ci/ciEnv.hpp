@@ -38,6 +38,7 @@
 
 class CompileTask;
 class OopMapSet;
+class SCAEntry;
 
 // ciEnv
 //
@@ -384,7 +385,7 @@ public:
                        bool                      has_monitors,
                        int                       immediate_oops_patched,
                        RTMState                  rtm_state = NoRTM,
-                       bool                      is_shared = false);
+                       SCAEntry*                 entry = nullptr);
 
   // Access to certain well known ciObjects.
 #define VM_CLASS_FUNC(name, ignore_s) \
