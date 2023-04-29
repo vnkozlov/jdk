@@ -388,6 +388,8 @@
   product(ccstr, SharedCodeArchive, "code.jsa",                             \
           "File with compiled code")                                        \
                                                                             \
+  product(bool, VerifySharedCode, false, DIAGNOSTIC,                        \
+          "Load compiled code but not publish")                             \
 
 // end of COMPILER_FLAGS
 

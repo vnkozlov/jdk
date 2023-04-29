@@ -207,7 +207,7 @@ private:
     Klass     = 1,
     Method    = 2,
     String    = 3,
-    Array     = 4, // primitive array
+    Primitive = 4, // primitive Class object
     SysLoader = 5, // java_system_loader
     PlaLoader = 6  // java_platform_loader
   };
@@ -235,7 +235,7 @@ public:
   bool write_method(Method* method);
 
   bool read_code(CodeBuffer* buffer, CodeBuffer* orig_buffer);
-  bool read_relocations(CodeBuffer* buffer, CodeBuffer* orig_buffer, uint reloc_size);
+  bool read_relocations(CodeBuffer* buffer, CodeBuffer* orig_buffer, uint reloc_size, OopRecorder* oop_recorder);
   bool write_code(CodeBuffer* buffer, uint& code_size);
   bool write_relocations(CodeBuffer* buffer, uint& reloc_size);
   DebugInformationRecorder* read_debug_info(OopRecorder* oop_recorder);

@@ -98,13 +98,13 @@ void SCArchive::initialize() {
 void SCArchive::close() {
   if (_archive != nullptr) {
     delete _archive; // Free memory
+    _archive = nullptr;
   }
 }
 
 void SCArchive::invalidate(SCAEntry* entry) {
   // This could be concurent execution
-  if (entry != nullptr) {
-    assert(_archive != nullptr, "should be load from archive");
+  if (entry != nullptr && _archive != nullptr) { // Request could come after archive is closed.
     _archive->invalidate(entry);
   }
 }
@@ -138,6 +138,7 @@ bool SCArchive::open_for_read(const char* archive_path) {
   SCAFile* archive = new SCAFile(archive_path, fd, (uint)st.st_size, true /* for_read */);
   if (archive->fd() < 0) { // failed
     delete archive;
+    _archive = nullptr;
     return false;
   }
   _archive = archive;
@@ -161,6 +162,7 @@ bool SCArchive::open_for_write(const char* archive_path) {
   SCAFile* archive = new SCAFile(archive_path, fd, 0, false /* for_read */);
   if (archive->fd() < 0) { // failed
     delete archive;
+    _archive = nullptr;
     return false;
   }
   _archive = archive;
@@ -236,12 +238,15 @@ SCAFile::~SCAFile() {
   FREE_C_HEAP_ARRAY(char, _archive_path);
   if (_entries != nullptr) {
     FREE_C_HEAP_ARRAY(SCAEntry, _entries);
+    _entries = nullptr;
   }
   if (_write_entries != nullptr) {
     delete _write_entries;
+    _write_entries = nullptr;
   }
   if (_table != nullptr) {
     delete _table;
+    _table = nullptr;
   }
 }
 
@@ -356,6 +361,7 @@ SCAEntry* SCAFile::find_entry(SCAEntry::Kind kind, uint id, uint decomp) {
     _entries = NEW_C_HEAP_ARRAY(SCAEntry, count, mtCode);
     uint n = read_bytes((void*)&(_entries[0]), entries_size);
     if (n != entries_size) {
+      _entries = nullptr;
       return nullptr;
     }
     log_info(sca)("Read %d SCAEntry entries at offset %d from shared code archive '%s'", count, _header.entries_offset(), _archive_path);
@@ -505,6 +511,7 @@ Klass* SCAFile::read_klass(const methodHandle& comp_method) {
   if (n != sizeof(int)) {
     return nullptr;
   }
+  ResourceMark rm;
   int total_length = name_length + 1;
   char* dest = NEW_RESOURCE_ARRAY(char, total_length);
   n = read_bytes(dest, total_length);
@@ -549,6 +556,7 @@ Method* SCAFile::read_method(const methodHandle& comp_method) {
   if (n != sizeof(int)) {
     return nullptr;
   }
+  ResourceMark rm;
   int total_length = holder_length + 1 + name_length + 1 + signat_length + 1;
   char* dest = NEW_RESOURCE_ARRAY(char, total_length);
   n = read_bytes(dest, total_length);
@@ -590,7 +598,6 @@ Method* SCAFile::read_method(const methodHandle& comp_method) {
   }
   Method* m = InstanceKlass::cast(k)->find_method(name_sym, sign_sym);
   if (m != nullptr) {
-    ResourceMark rm;
     log_info(sca)("Method lookup: %s", m->name_and_sig_as_C_string());
   } else {
     set_lookup_failed();
@@ -601,6 +608,7 @@ Method* SCAFile::read_method(const methodHandle& comp_method) {
 }
 
 bool SCAFile::write_klass(Klass* klass) {
+  ResourceMark rm;
   Symbol* name = klass->name();
   int name_length = name->utf8_length();
   int total_length = name_length + 1;
@@ -625,6 +633,7 @@ bool SCAFile::write_klass(Klass* klass) {
 }
 
 bool SCAFile::write_method(Method* method) {
+  ResourceMark rm;
   Symbol* name   = method->name();
   Symbol* holder = method->klass_name();
   Symbol* signat = method->signature();
@@ -668,7 +677,8 @@ bool SCAFile::write_method(Method* method) {
 }
 
 // Repair the pc relative information in the code after load
-bool SCAFile::read_relocations(CodeBuffer* buffer, CodeBuffer* orig_buffer, uint max_reloc_size) {
+bool SCAFile::read_relocations(CodeBuffer* buffer, CodeBuffer* orig_buffer,
+                               uint max_reloc_size, OopRecorder* oop_recorder) {
   // Read max count
   uint max_reloc_count = max_reloc_size / sizeof(relocInfo);
   bool success = true;
@@ -719,33 +729,46 @@ bool SCAFile::read_relocations(CodeBuffer* buffer, CodeBuffer* orig_buffer, uint
         case relocInfo::none:
           break;
         case relocInfo::oop_type: {
+          VM_ENTRY_MARK;
           oop_Relocation* r = (oop_Relocation*)iter.reloc();
           if (r->oop_is_immediate()) {
             assert(reloc_data[j] == (uint)j, "should be");
-            VM_ENTRY_MARK;
             methodHandle comp_method(THREAD, target()->get_Method());
             jobject jo = read_oop(THREAD, comp_method);
             if (failed() || lookup_failed()) {
               success = false;
-            } else {
-              r->set_value((address)jo);
+              break;
             }
+            r->set_value((address)jo);
+          } else {
+            // Get already updated value from OopRecorder.
+            assert(oop_recorder != nullptr, "sanity");
+            int index = r->oop_index();
+            jobject jo = oop_recorder->oop_at(index);
+            oop obj = JNIHandles::resolve(jo);
+            r->set_value(*reinterpret_cast<address*>(&obj));
           }
           break;
         }
         case relocInfo::metadata_type: {
+          VM_ENTRY_MARK;
           metadata_Relocation* r = (metadata_Relocation*)iter.reloc();
+          Metadata* m;
           if (r->metadata_is_immediate()) {
             assert(reloc_data[j] == (uint)j, "should be");
-            VM_ENTRY_MARK;
             methodHandle comp_method(THREAD, target()->get_Method());
-            Metadata* m = read_metadata(comp_method);
+            m = read_metadata(comp_method);
             if (failed() || lookup_failed()) {
               success = false;
-            } else {
-              r->set_value((address)m);
+              break;
             }
+          } else {
+            // Get already updated value from OopRecorder.
+            assert(oop_recorder != nullptr, "sanity");
+            int index = r->metadata_index();
+            m = oop_recorder->metadata_at(index);
           }
+          r->set_value((address)m);
           break;
         }
         case relocInfo::virtual_call_type:   // Fall through. They all call resolve_*_call blobs.
@@ -925,7 +948,7 @@ if (UseNewCode2) {
   if (!archive->seek_to_position(reloc_offset)) {
     return false;
   }
-  if (!archive->read_relocations(buffer, &orig_buffer, entry->reloc_size())) {
+  if (!archive->read_relocations(buffer, &orig_buffer, entry->reloc_size(), nullptr)) {
     return false;
   }
 
@@ -1291,34 +1314,31 @@ bool SCAFile::write_oop_maps(OopMapSet* oop_maps) {
 }
 
 jobject SCAFile::read_oop(JavaThread* thread, const methodHandle& comp_method) {
-  jobject jo = nullptr;
+  oop obj = nullptr;
   DataKind kind;
   uint n = read_bytes(&kind, sizeof(int));
   if (n != sizeof(int)) {
     return nullptr;
   }
   if (kind == DataKind::Null) {
-    jo = (jobject)nullptr;
+    return nullptr;
   } else if (kind == DataKind::No_Data) {
-    jo = (jobject)Universe::non_oop_word;
+    return (jobject)Universe::non_oop_word();
   } else if (kind == DataKind::Klass) {
     Klass* k = read_klass(comp_method);
     if (k == nullptr) {
       return nullptr;
     }
-    oop javaMirror = k->java_mirror();
-    jo = JNIHandles::make_local(thread, javaMirror);
-  } else if (kind == DataKind::Array) {
+    obj = k->java_mirror();
+  } else if (kind == DataKind::Primitive) {
     int t = 0;
     n = read_bytes(&t, sizeof(int));
     if (n != sizeof(int)) {
       return nullptr;
     }
     BasicType bt = (BasicType)t;
-    Klass* ak = Universe::typeArrayKlassObj(bt);
-    oop javaMirror = ak->java_mirror();
-    log_info(sca)("Read primitive array: %s", ak->internal_name());
-    jo = JNIHandles::make_local(thread, javaMirror);
+    obj = java_lang_Class::primitive_mirror(bt);
+    log_info(sca)("Read primitive type klass: %s", type2name(bt));
   } else if (kind == DataKind::String) {
     int length = 0;
     n = read_bytes(&length, sizeof(int));
@@ -1332,26 +1352,26 @@ jobject SCAFile::read_oop(JavaThread* thread, const methodHandle& comp_method) {
       return nullptr;
     }
     dest[length] = '\0';
-    oop str = StringTable::intern(&(dest[0]), thread);
-    if (str == nullptr) {
+    obj = StringTable::intern(&(dest[0]), thread);
+    if (obj == nullptr) {
       set_lookup_failed();
       log_info(sca)("Lookup failed for String %s", &(dest[0]));
       return nullptr;
     }
+    assert(java_lang_String::is_instance(obj), "must be string");
     log_info(sca)("Read String: %s", dest);
-    assert(java_lang_String::is_instance(str), "must be string");
-    jo = JNIHandles::make_local(thread, str);
   } else if (kind == DataKind::SysLoader) {
+    obj = SystemDictionary::java_system_loader();
     log_info(sca)("Read java_system_loader");
-    jo = JNIHandles::make_local(thread, SystemDictionary::java_system_loader());
   } else if (kind == DataKind::PlaLoader) {
+    obj = SystemDictionary::java_platform_loader();
     log_info(sca)("Read java_platform_loader");
-    jo = JNIHandles::make_local(thread, SystemDictionary::java_platform_loader());
   } else {
     set_lookup_failed();
-    log_info(sca)("Unknown oop's kind: %d", kind);
+    log_info(sca)("Unknown oop's kind: %d", (int)kind);
+    return nullptr;
   }
-  return jo;
+  return JNIHandles::make_local(thread, obj);
 }
 
 bool SCAFile::read_oops(OopRecorder* oop_recorder, ciMethod* target) {
@@ -1360,20 +1380,32 @@ bool SCAFile::read_oops(OopRecorder* oop_recorder, ciMethod* target) {
   if (n != sizeof(int)) {
     return false;
   }
+if (UseNewCode3) {
+  tty->print_cr("======== read oops [%d]:", oop_count);
+}
   if (oop_count == 0) {
     return true;
   }
-
   {
     VM_ENTRY_MARK;
     methodHandle comp_method(THREAD, target->get_Method());
-
     for (int i = 0; i < oop_count; i++) {
       jobject jo = read_oop(THREAD, comp_method);
       if (failed() || lookup_failed()) {
         return false;
       }
       oop_recorder->find_index(jo);
+if (UseNewCode3) {
+      tty->print("%d: " INTPTR_FORMAT " ", i, p2i(jo));
+      if (jo == (jobject)Universe::non_oop_word()) {
+        tty->print("non-oop word");
+      } else if (jo == nullptr) {
+        tty->print("nullptr-oop");
+      } else {
+        JNIHandles::resolve(jo)->print_value_on(tty);
+      }
+      tty->cr();
+}
     }
   }
   return true;
@@ -1396,7 +1428,7 @@ Metadata* SCAFile::read_metadata(const methodHandle& comp_method) {
     m = (Metadata*)read_method(comp_method);
   } else {
     set_lookup_failed();
-    log_info(sca)("Unknown metadata's kind: %d", kind);
+    log_info(sca)("Unknown metadata's kind: %d", (int)kind);
   }
   return m;
 }
@@ -1407,10 +1439,12 @@ bool SCAFile::read_metadata(OopRecorder* oop_recorder, ciMethod* target) {
   if (n != sizeof(int)) {
     return false;
   }
+if (UseNewCode3) {
+  tty->print_cr("======== read metadata [%d]:", metadata_count);
+}
   if (metadata_count == 0) {
     return true;
   }
-
   {
     VM_ENTRY_MARK;
     methodHandle comp_method(THREAD, target->get_Method());
@@ -1421,6 +1455,17 @@ bool SCAFile::read_metadata(OopRecorder* oop_recorder, ciMethod* target) {
         return false;
       }
       oop_recorder->find_index(m);
+if (UseNewCode3) {
+     tty->print("%d: " INTPTR_FORMAT " ", i, p2i(m));
+      if (m == (Metadata*)Universe::non_oop_word()) {
+        tty->print("non-metadata word");
+      } else if (m == nullptr) {
+        tty->print("nullptr-oop");
+      } else {
+        Metadata::print_value_on_maybe_null(tty, m);
+      }
+      tty->cr();
+}
     }
   }
   return true;
@@ -1445,22 +1490,16 @@ bool SCAFile::write_oop(jobject& jo) {
   } else if (java_lang_Class::is_instance(obj)) {
     if (java_lang_Class::is_primitive(obj)) {
       int bt = (int)java_lang_Class::primitive_type(obj);
-      Klass* ak = java_lang_Class::array_klass_acquire(obj);
-      if (ak != nullptr) {
-        kind = DataKind::Array;
-        n = write_bytes(&kind, sizeof(int));
-        if (n != sizeof(int)) {
-          return false;
-        }
-        n = write_bytes(&bt, sizeof(int));
-        if (n != sizeof(int)) {
-          return false;
-        }
-        log_info(sca)("Write primitive array: %s", ak->internal_name());
-      } else {
-        fatal("primitive Class unimplemented");
+      kind = DataKind::Primitive;
+      n = write_bytes(&kind, sizeof(int));
+      if (n != sizeof(int)) {
         return false;
       }
+      n = write_bytes(&bt, sizeof(int));
+      if (n != sizeof(int)) {
+        return false;
+      }
+      log_info(sca)("Write primitive type klass: %s", type2name((BasicType)bt));
     } else {
       Klass* klass = java_lang_Class::as_Klass(obj);
       if (!write_klass(klass)) {
@@ -1489,8 +1528,10 @@ bool SCAFile::write_oop(jobject& jo) {
   } else if (java_lang_ClassLoader::is_instance(obj)) {
     if (obj == SystemDictionary::java_system_loader()) {
       kind = DataKind::SysLoader;
+      log_info(sca)("Write ClassLoader: java_system_loader");
     } else if (obj == SystemDictionary::java_platform_loader()) {
       kind = DataKind::PlaLoader;
+      log_info(sca)("Write ClassLoader: java_platform_loader");
     } else {
       fatal("ClassLoader object unimplemented");
       return false;
@@ -1499,7 +1540,6 @@ bool SCAFile::write_oop(jobject& jo) {
     if (n != sizeof(int)) {
       return false;
     }
-    log_info(sca)("Write ClassLoader: %d", kind);
   } else {
     // Embedded oop - bailout
     set_lookup_failed();
@@ -1516,7 +1556,7 @@ bool SCAFile::write_oops(OopRecorder* oop_recorder) {
     return false;
   }
 if (UseNewCode3) {
-  tty->print_cr("======== oops:");
+  tty->print_cr("======== write oops [%d]:", oop_count);
 }
   for (int i = 0; i < oop_count; i++) {
     jobject jo = oop_recorder->oop_at(i);
@@ -1524,8 +1564,8 @@ if (UseNewCode3) {
      tty->print("%d: " INTPTR_FORMAT " ", i, p2i(jo));
       if (jo == (jobject)Universe::non_oop_word()) {
         tty->print("non-oop word");
-      } else if (jo == NULL) {
-        tty->print("NULL-oop");
+      } else if (jo == nullptr) {
+        tty->print("nullptr-oop");
       } else {
         JNIHandles::resolve(jo)->print_value_on(tty);
       }
@@ -1575,7 +1615,7 @@ bool SCAFile::write_metadata(OopRecorder* oop_recorder) {
   }
 
 if (UseNewCode3) {
-  tty->print_cr("======== metadata:");
+  tty->print_cr("======== write metadata [%d]:", metadata_count);
 }
   for (int i = 0; i < metadata_count; i++) {
     Metadata* m = oop_recorder->metadata_at(i);
@@ -1583,8 +1623,8 @@ if (UseNewCode3) {
      tty->print("%d: " INTPTR_FORMAT " ", i, p2i(m));
       if (m == (Metadata*)Universe::non_oop_word()) {
         tty->print("non-metadata word");
-      } else if (m == NULL) {
-        tty->print("NULL-oop");
+      } else if (m == nullptr) {
+        tty->print("nillptr-oop");
       } else {
         Metadata::print_value_on_maybe_null(tty, m);
       }
@@ -1620,12 +1660,15 @@ bool SCAFile::load_nmethod(ciEnv* env, ciMethod* target, int entry_bci, Abstract
   }
   uint hash = java_lang_String::hash_code((const jbyte*)target_name, strlen(target_name));
 
-tty->print_cr("=== load_nmethod: 1");
+log_info(sca, nmethod)("Reading nmethod '%s' (decomp: %d) from shared code archive '%s'", target_name, decomp, archive->_archive_path);
 
   SCAEntry* entry = archive->find_entry(SCAEntry::Code, hash, decomp);
   if (entry == nullptr) {
     return false;
   }
+
+if (UseNewCode3) tty->print_cr("=== load_nmethod: 1");
+
   uint entry_position = entry->offset();
   if (!archive->seek_to_position(entry_position)) {
     return false;
@@ -1655,7 +1698,7 @@ tty->print_cr("=== load_nmethod: 1");
     return false;
   }
 
-tty->print_cr("=== load_nmethod: 2");
+if (UseNewCode3) tty->print_cr("=== load_nmethod: 2");
 
   // Read flags
   int flags = 0;
@@ -1686,7 +1729,7 @@ tty->print_cr("=== load_nmethod: 2");
     return false;
   }
 
-tty->print_cr("=== load_nmethod: 3");
+if (UseNewCode3) tty->print_cr("=== load_nmethod: 3");
 
   // Create Debug Information Recorder to record scopes, oopmaps, etc.
   OopRecorder* oop_recorder = new OopRecorder(env->arena());
@@ -1707,7 +1750,7 @@ tty->print_cr("=== load_nmethod: 3");
   }
   env->set_debug_info(recorder);
 
-tty->print_cr("=== load_nmethod: 4");
+if (UseNewCode3) tty->print_cr("=== load_nmethod: 4");
 
   // Read Dependencies (compressed already)
   Dependencies* dependencies = new Dependencies(env);
@@ -1765,7 +1808,7 @@ tty->print_cr("=== load_nmethod: 4");
     }
   }
 
-tty->print_cr("=== load_nmethod: 5");
+if (UseNewCode3) tty->print_cr("=== load_nmethod: 5");
 
   uint reloc_max_size = entry->reloc_size();
   CodeBuffer buffer("Compile::Fill_buffer", entry->code_size(), reloc_max_size);
@@ -1784,7 +1827,7 @@ tty->print_cr("=== load_nmethod: 5");
   if (!archive->seek_to_position(reloc_offset)) {
     return false;
   }
-  if (!archive->read_relocations(&buffer, &orig_buffer, reloc_max_size)) {
+  if (!archive->read_relocations(&buffer, &orig_buffer, reloc_max_size, oop_recorder)) {
     return false;
   }
 
@@ -1798,7 +1841,7 @@ if (UseNewCode3) {
 #endif
   FREE_C_HEAP_ARRAY(char, name);
 
-  if (!UseNewCode) return false;
+  if (VerifySharedCode) return false;
 
   // Register nmethod
   env->register_method(target, entry_bci,
@@ -1811,7 +1854,6 @@ if (UseNewCode3) {
                        has_monitors,
                        0, NoRTM,
                        entry);
-
   return true;
 }
 
@@ -1831,6 +1873,8 @@ bool SCAFile::store_nmethod(const methodHandle& method,
                      bool has_unsafe_access,
                      bool has_wide_vectors,
                      bool has_monitors) {
+// No concurency for writing to archive file because this method is called from
+// ciEnv::register_method() under MethodCompileQueue_lock and Compile_lock locks.
   if (entry_bci != InvocationEntryBci) {
     return false; // No OSR
   }
@@ -1863,6 +1907,8 @@ if (UseNewCode3) {
   {
     ResourceMark rm;
     const char* name   = method->name_and_sig_as_C_string();
+    log_info(sca, nmethod)("Writing nmethod '%s' to shared code archive '%s'", name, archive->_archive_path);
+
     name_offset = archive->_file_offset  - entry_position;
     name_size   = (uint)strlen(name) + 1; // Includes '/0'
     n = archive->write_bytes(name, name_size);
@@ -2015,12 +2061,15 @@ void SCATable::init() {
 
   SET_ADDRESS(_extrs, SharedRuntime::complete_monitor_unlocking_C);
   SET_ADDRESS(_extrs, SharedRuntime::enable_stack_reserved_zone);
-  SET_ADDRESS(_extrs, &SharedRuntime::_partial_subtype_ctr);
   SET_ADDRESS(_extrs, ci_card_table_address_as<address>());
   SET_ADDRESS(_extrs, ThreadIdentifier::unsafe_offset());
 
   SET_ADDRESS(_extrs, os::javaTimeMillis);
   SET_ADDRESS(_extrs, os::javaTimeNanos);
+
+#ifndef PRODUCT
+  SET_ADDRESS(_extrs, &SharedRuntime::_partial_subtype_ctr);
+#endif
 
 #if defined(AMD64) || defined(AARCH64) || defined(RISCV64)
   SET_ADDRESS(_extrs, MacroAssembler::debug64);

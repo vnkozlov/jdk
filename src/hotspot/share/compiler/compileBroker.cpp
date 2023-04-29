@@ -1019,7 +1019,7 @@ void CompileBroker::possibly_add_compiler_threads(JavaThread* THREAD) {
   // Only do attempt to start additional threads if the lock is free.
   if (!CompileThread_lock->try_lock()) return;
 
-  if (_c2_compile_queue != nullptr) {
+  if (_c2_compile_queue != nullptr && !LoadSharedCode) {
     int old_c2_count = _compilers[1]->num_compiler_threads();
     int new_c2_count = MIN4(_c2_count,
         _c2_compile_queue->size() / 2,
