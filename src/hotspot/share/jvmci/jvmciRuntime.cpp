@@ -2150,7 +2150,6 @@ JVMCI::CodeInstallResult JVMCIRuntime::register_method(JVMCIEnv* JVMCIENV,
       // as in C2, then it must be freed.
       //code_buffer->free_blob();
     } else {
-      code_buffer->finalize_oop_references(method);
       nm =  nmethod::new_nmethod(method,
                                  compile_id,
                                  entry_bci,

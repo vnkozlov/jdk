@@ -4512,7 +4512,7 @@ void TypeInstPtr::dump2(Dict &d, uint depth, outputStream* st) const {
       ResourceMark rm;
       stringStream ss;
 
-      st->print(" ");
+      st->print(" " INTPTR_FORMAT, p2i(const_oop()));
       const_oop()->print_oop(&ss);
       // 'const_oop->print_oop()' may emit newlines('\n') into ss.
       // suppress newlines from it so -XX:+Verbose -XX:+PrintIdeal dumps one-liner for each node.
@@ -5132,6 +5132,7 @@ void TypeAryPtr::dump2( Dict &d, uint depth, outputStream *st ) const {
 
   switch( _ptr ) {
   case Constant:
+    st->print(" " INTPTR_FORMAT " ", p2i(const_oop()));
     const_oop()->print(st);
     break;
   case BotPTR:

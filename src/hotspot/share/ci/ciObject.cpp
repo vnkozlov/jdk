@@ -221,7 +221,7 @@ bool ciObject::should_be_constant() {
   }
   if ((klass()->is_subclass_of(env->MethodHandle_klass()) ||
        klass()->is_subclass_of(env->CallSite_klass())) &&
-      !SCArchive::is_on()) { // For now disable it when SCArchive is on.
+      !(SCArchive::is_on() && StoreSharedCode)) { // For now disable it when writing SCArchive.
     // We want to treat these aggressively.
     return true;
   }

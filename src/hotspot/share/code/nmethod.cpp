@@ -559,6 +559,7 @@ nmethod* nmethod::new_nmethod(const methodHandle& method,
 )
 {
   assert(debug_info->oop_recorder() == code_buffer->oop_recorder(), "shared OR");
+  code_buffer->finalize_oop_references(method);
   // create nmethod
   nmethod* nm = nullptr;
 #if INCLUDE_JVMCI

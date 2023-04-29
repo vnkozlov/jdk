@@ -69,6 +69,7 @@
 #include "prims/jvmtiExport.hpp"
 #include "prims/methodHandles.hpp"
 #include "runtime/fieldDescriptor.inline.hpp"
+#include "runtime/flags/flagSetting.hpp"
 #include "runtime/handles.inline.hpp"
 #include "runtime/init.hpp"
 #include "runtime/javaThread.hpp"
@@ -1130,9 +1131,6 @@ void ciEnv::register_method(ciMethod* target,
     assert(offsets->value(CodeOffsets::Deopt) != -1, "must have deopt entry");
     assert(offsets->value(CodeOffsets::Exceptions) != -1, "must have exception entry");
 
-    if (sca_entry == nullptr) { // Loaded shared code has finalize oops already
-      code_buffer->finalize_oop_references(method);
-    }
     if (rtm_state == NoRTM) {
       SCAFile::store_nmethod(method,
                              compile_id(),

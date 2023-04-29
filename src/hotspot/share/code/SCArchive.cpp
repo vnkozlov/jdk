@@ -110,8 +110,10 @@ void SCArchive::invalidate(SCAEntry* entry) {
 }
 
 bool SCArchive::allow_const_field(ciConstant& value) {
-  return !is_on() || !is_reference_type(value.basic_type()) ||
-         value.as_object()->should_be_constant();
+  return !is_on() || !StoreSharedCode // Restrict only when we generate archive
+        // Can not trust primitive too   || !is_reference_type(value.basic_type())
+        // May disable this too for now  || is_reference_type(value.basic_type()) && value.as_object()->should_be_constant()
+        ;
 }
 
 bool SCArchive::open_for_read(const char* archive_path) {
@@ -740,7 +742,7 @@ bool SCAFile::read_relocations(CodeBuffer* buffer, CodeBuffer* orig_buffer,
               break;
             }
             r->set_value((address)jo);
-          } else {
+          } else if (false) {
             // Get already updated value from OopRecorder.
             assert(oop_recorder != nullptr, "sanity");
             int index = r->oop_index();
@@ -1898,6 +1900,10 @@ if (UseNewCode3) {
   uint entry_position = archive->_file_offset;
 
   assert(entry_bci == InvocationEntryBci, "No OSR");
+
+  // Finalize OopRecorder data here because after we query
+  // the size of its data it can't be updated any more.
+  buffer->finalize_oop_references(method);
 
   // Write name
   uint name_offset = 0;

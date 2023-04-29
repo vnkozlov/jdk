@@ -82,9 +82,7 @@ template <class T> class ValueRecorder : public StackObj {
   void copy_values_to(nmethod* nm);
 
   bool is_unused() { return _handles == nullptr && !_complete; }
-#ifdef ASSERT
   bool is_complete() { return _complete; }
-#endif
 
  private:
   // variant of find_index which does not allocate if not found (yields -1)
@@ -235,12 +233,10 @@ class OopRecorder : public ResourceObj {
     }
   }
 
-#ifdef ASSERT
   bool is_complete() {
     assert(_oops.is_complete() == _metadata.is_complete(), "must agree");
     return _oops.is_complete();
   }
-#endif
 };
 
 
