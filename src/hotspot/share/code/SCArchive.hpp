@@ -49,23 +49,29 @@ class SCAHeader {
 private:
   // Here should be version and other verification fields
   uint _version;           // JDK version (should match when reading archive)
+  uint _strings_count;
   uint _entries_count;     // number of recorded entries in archive
   uint _archive_size;      // archive size in bytes
+  uint _strings_offset;    // offset to recorded C strings
   uint _entries_offset;    // offset of SCAEntry array describing entries
 
 public:
-  void init(uint version, int count, uint archive_size, uint entries_offset) {
+  void init(uint version, int count, uint archive_size, uint entries_offset, uint strings_count, uint strings_offset) {
     _version        = version;
+    _strings_count  = strings_count;
     _entries_count  = count;
     _archive_size   = archive_size;
+    _strings_offset = strings_offset;
     _entries_offset = entries_offset;
   }
 
   uint version()        const { return _version; }
+  uint strings_count()  const { return _strings_count; }
   uint entries_count()  const { return _entries_count; }
   uint next_idx()             { return _entries_count++; }
 
   uint archive_size()   const { return _archive_size; }
+  uint strings_offset() const { return _strings_offset; }
   uint entries_offset() const { return _entries_offset; }
 };
 
@@ -153,11 +159,16 @@ private:
   uint     _blobs_length;
 
   bool _complete;
+  bool _opto_complete;
+
 public:
-  SCATable() { _complete = false; }
+  SCATable() { _complete = false; _opto_complete = false; }
   ~SCATable();
   void init();
   void init_opto();
+  void add_C_string(const char* str);
+  int  id_for_C_string(address str);
+  address address_for_C_string(int idx);
   int  id_for_address(address addr);
   address address_for_id(int id);
 };
@@ -178,13 +189,12 @@ private:
   SCAEntry* _entries;                      // Used when reading archive
   GrowableArray<SCAEntry>* _write_entries; // Used when writing archive
 
+  char* _C_strings_buf; // Loaded buffer for _C_strings[] table
+
   ciMethod* _target; // Current compiled method
 
   void set_target(ciMethod* target) { _target = target; }
   ciMethod* target()          const { return _target; }   
-
-  bool for_read() const;
-  bool for_write() const;
 
   static SCAFile* open_for_read();
   static SCAFile* open_for_write();
@@ -215,9 +225,18 @@ private:
 public:
   SCAFile(const char* archive_path, int fd, uint file_size, bool for_read);
   ~SCAFile();
+
+  bool load_strings();
+  int store_strings();
+
   static void init_table();
   static void init_opto_table();
   int fd() const { return _fd; }
+
+  bool for_read() const;
+  bool for_write() const;
+
+  void add_C_string(const char* str);
 
   void add_entry(SCAEntry entry);
   SCAEntry* find_entry(SCAEntry::Kind kind, uint id, uint decomp = 0);
@@ -290,6 +309,7 @@ public:
   static bool is_on() { return _archive != nullptr; }
   static bool allow_const_field(ciConstant& value);
   static void invalidate(SCAEntry* entry);
+  static void add_C_string(const char* str);
 };
 
 #endif // SHARE_CODE_SCARCHIVE_HPP

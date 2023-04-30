@@ -109,6 +109,12 @@ void SCArchive::invalidate(SCAEntry* entry) {
   }
 }
 
+void SCArchive::add_C_string(const char* str) {
+  if (_archive != nullptr && _archive->for_write()) {
+    _archive->add_C_string(str);
+  }
+}
+
 bool SCArchive::allow_const_field(ciConstant& value) {
   return !is_on() || !StoreSharedCode // Restrict only when we generate archive
         // Can not trust primitive too   || !is_reference_type(value.basic_type())
@@ -182,6 +188,7 @@ SCAFile::SCAFile(const char* archive_path, int fd, uint file_size, bool for_read
   _table = nullptr;
   _entries = nullptr;
   _write_entries = nullptr;
+  _C_strings_buf = nullptr;
   _target = nullptr;
 
   // Read header st the begining of archive
@@ -198,9 +205,18 @@ SCAFile::SCAFile(const char* archive_path, int fd, uint file_size, bool for_read
     assert(_header.version() == VM_Version::jvm_version(), "sanity");
     assert(_header.archive_size() <= file_size, "recorded %d vs actual %d", _header.archive_size(), file_size);
     log_info(sca)("Read header from shared code archive '%s'", archive_path);
+
+    // Read strings
+    if (!load_strings()) {
+      return;
+    }
+    uint strings_count  = _header.strings_count();
+    uint strings_offset = _header.strings_offset();
+    uint strings_size   = _header.entries_offset() - strings_offset;
+    
   } else {
     // Write initial version of header
-    _header.init(VM_Version::jvm_version(), 0 /* entry_count */, 0 /* archive_size */, 0 /* entries_offset */);
+    _header.init(VM_Version::jvm_version(), 0 /* entry_count */, 0 /* archive_size */, 0 /* entries_offset */, 0, 0);
     uint header_size = sizeof(SCAHeader);
     uint n = write_bytes((const void*)&_header, header_size);
     if (n != header_size) {
@@ -238,6 +254,10 @@ SCAFile::~SCAFile() {
   _fd = -1;
   log_info(sca)("Closed shared code archive '%s'", _archive_path);
   FREE_C_HEAP_ARRAY(char, _archive_path);
+  if (_C_strings_buf != nullptr) {
+    FREE_C_HEAP_ARRAY(char, _C_strings_buf);
+    _C_strings_buf = nullptr;
+  }
   if (_entries != nullptr) {
     FREE_C_HEAP_ARRAY(SCAEntry, _entries);
     _entries = nullptr;
@@ -402,8 +422,13 @@ void SCAFile::invalidate(SCAEntry* entry) {
 
 bool SCAFile::finish_write() {
   uint version = _header.version();
-  uint entries_offset   = 0; // 0 is deafult if empty
-  int count   = _write_entries->length();
+  uint entries_offset = 0; // 0 is deafult if empty
+  uint strings_offset = _file_offset;
+  int strings_count = store_strings();
+  if (strings_count < 0) {
+    return false;
+  }
+  int count = _write_entries->length();
   if (count > 0) {
     SCAEntry* entries_address = _write_entries->adr_at(0);
     // Write SCAEntry entries
@@ -417,7 +442,7 @@ bool SCAFile::finish_write() {
   }
 
   // Finalize and write header
-  _header.init(version, count, _file_offset, entries_offset);
+  _header.init(version, count, _file_offset, entries_offset, (uint)strings_count, strings_offset);
   if (!seek_to_position(0)) {
     return false;
   }
@@ -2040,6 +2065,7 @@ if (UseNewCode3) {
 #define _extrs_max 20
 #define _stubs_max 110
 #define _blobs_max 40
+#define _all_max 170
 
 #define SET_ADDRESS(type, addr)                          \
   {                                                      \
@@ -2253,6 +2279,7 @@ void SCATable::init_opto() {
   SET_ADDRESS(_blobs, OptoRuntime::slow_arraycopy_Java());
   SET_ADDRESS(_blobs, OptoRuntime::register_finalizer_Java());
 #endif
+  _opto_complete = true;
 }
 
 #undef SET_ADDRESS
@@ -2272,6 +2299,104 @@ SCATable::~SCATable() {
   }
 }
 
+#define MAX_STR_COUNT 100
+static const char* _C_strings[MAX_STR_COUNT] = {nullptr};
+static int _C_strings_count = 0;
+
+bool SCAFile::load_strings() {
+  uint strings_count  = _header.strings_count();
+  if (strings_count == 0) {
+    return true;
+  }
+  uint strings_offset = _header.strings_offset();
+  uint strings_size   = _header.entries_offset() - strings_offset;
+  if (!seek_to_position(strings_offset)) {
+    return false;
+  }
+  // Read sizes first
+  uint sizes_size = (uint)(strings_count * sizeof(uint));
+  uint* sizes = NEW_C_HEAP_ARRAY(uint, sizes_size, mtCode);
+  uint n = read_bytes(sizes, sizes_size);
+  if (n != sizes_size) {
+    return false;
+  }
+  strings_size -= sizes_size;
+  _C_strings_buf = NEW_C_HEAP_ARRAY(char, strings_size, mtCode);
+  n = read_bytes(_C_strings_buf, strings_size);
+  if (n != strings_size) {
+    return false;
+  }
+  char* p = _C_strings_buf;
+  assert(strings_count <= MAX_STR_COUNT, "sanity");
+  for (uint i = 0; i < strings_count; i++) {
+    _C_strings[i] = (const char*)p;
+    p += sizes[i];
+  }
+  assert((p - _C_strings_buf) == strings_size, "sanity");
+  _C_strings_count = strings_count;
+  FREE_C_HEAP_ARRAY(uint, sizes);
+  return true;
+}
+
+int SCAFile::store_strings() {
+  if (_C_strings_count > 0) {
+    // Write sizes first
+    for (int i = 0; i < _C_strings_count; i++) {
+      uint len = (uint)strlen(_C_strings[i]) + 1; // Include 0
+      uint n = write_bytes(&len, sizeof(uint));
+      if (n != sizeof(uint)) {
+        return -1;
+      }
+    }
+    for (int i = 0; i < _C_strings_count; i++) {
+      uint len = (uint)strlen(_C_strings[i]) + 1; // Include 0
+      uint n = write_bytes(_C_strings[i], len);
+      if (n != len) {
+        return -1;
+      }
+    }
+    log_info(sca)("Wrote %d C strings to shared code archive '%s'", _C_strings_count, _archive_path);
+  }
+  return _C_strings_count;
+}
+
+void SCAFile::add_C_string(const char* str) {
+  assert(for_write(), "only when storing code");
+  _table->add_C_string(str);
+}
+
+void SCATable::add_C_string(const char* str) {
+  if (str != nullptr && _complete && _opto_complete) {
+    // Check previous strings address
+    for (int i = 0; i < _C_strings_count; i++) {
+      if (_C_strings[i] == str) {
+        return; // Found existing one
+      }
+    }
+    // Add new one
+    if (_C_strings_count < MAX_STR_COUNT) {
+if (UseNewCode3) tty->print_cr("add_C_string: [%d] " INTPTR_FORMAT " %s", _C_strings_count, p2i(str), str);
+      _C_strings[_C_strings_count++] = str;
+    } else {
+      log_warning(sca)("Number of C strings > max %d %s", MAX_STR_COUNT, str);
+    }
+  }
+}
+
+int SCATable::id_for_C_string(address str) {
+  for (int i = 0; i < _C_strings_count; i++) {
+    if (_C_strings[i] == (const char*)str) {
+      return i; // Found existing one
+    }
+  }
+  return -1;
+}
+
+address SCATable::address_for_C_string(int idx) {
+  assert(idx < _C_strings_count, "sanity");
+  return (address)_C_strings[idx];
+}
+
 int search_address(address addr, address* table, uint length) {
   for (int i = 0; i < (int)length; i++) {
     if (table[i] == addr) {
@@ -2289,10 +2414,13 @@ address SCATable::address_for_id(int idx) {
     return (address)-1;
   }
   uint id = (uint)idx;
+  if (id >= _all_max && idx < (_all_max + _C_strings_count)) {
+    return address_for_C_string(idx - _all_max);
+  }
   if (idx < 0 || id == (_extrs_length + _stubs_length + _blobs_length)) {
     fatal("Incorrect id %d for SCA table", id);
   }
-  if (id > (_extrs_length + _stubs_length + _blobs_length)) {
+  if (idx > (_all_max + _C_strings_count)) {
     return (address)os::init + idx;
   }
   if (id < _extrs_length) {
@@ -2316,6 +2444,11 @@ int SCATable::id_for_address(address addr) {
   }
   if (!_complete) {
     fatal("SCA table is not complete");
+  }
+  // Seach for C string
+  id = id_for_C_string(addr);
+  if (id >=0) {
+    return id + _all_max;
   }
   if (StubRoutines::contains(addr)) {
     // Search in stubs
@@ -2353,7 +2486,7 @@ int SCATable::id_for_address(address addr) {
             // Could be address of C string
             uint dist = (uint)pointer_delta(addr, (address)os::init, 1);
             log_info(sca)("Address " INTPTR_FORMAT " (offset %d) for runtime target '%s' is missing in SCA table", p2i(addr), dist, (const char*)addr);
-            assert(dist > (uint)(_extrs_length + _stubs_length + _blobs_length), "change encoding of distance");
+            assert(dist > (uint)(_all_max + MAX_STR_COUNT), "change encoding of distance");
             return dist;
           }
           fatal("Address " INTPTR_FORMAT " for runtime target '%s+%d' is missing in SCA table", p2i(addr), func_name, offset);
