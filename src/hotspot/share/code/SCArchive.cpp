@@ -566,6 +566,7 @@ Klass* SCAFile::read_klass(const methodHandle& comp_method) {
   } else {
     set_lookup_failed();
     log_info(sca)("Lookup failed for class %s", &(dest[0]));
+    return nullptr;
   }
   return k;
 }
@@ -610,7 +611,8 @@ Method* SCAFile::read_method(const methodHandle& comp_method) {
     log_info(sca)("Holder lookup: %s", k->external_name());
   } else {
     set_lookup_failed();
-    log_info(sca)("Lookup failed for class %s", &(dest[0]));
+    log_info(sca)("Lookup failed for holder %s", &(dest[0]));
+    return nullptr;
   }
   TempNewSymbol name_sym = SymbolTable::probe(&(dest[holder_length + 1]), name_length);
   int pos = holder_length + 1 + name_length;
@@ -2245,6 +2247,12 @@ void SCATable::init() {
 #if defined(AMD64)
   SET_ADDRESS(_stubs, StubRoutines::x86::d2i_fixup());
   SET_ADDRESS(_stubs, StubRoutines::x86::f2i_fixup());
+  SET_ADDRESS(_stubs, StubRoutines::x86::d2l_fixup());
+  SET_ADDRESS(_stubs, StubRoutines::x86::f2l_fixup());
+  SET_ADDRESS(_stubs, StubRoutines::x86::float_sign_mask());
+  SET_ADDRESS(_stubs, StubRoutines::x86::float_sign_flip());
+  SET_ADDRESS(_stubs, StubRoutines::x86::double_sign_mask());
+  SET_ADDRESS(_stubs, StubRoutines::x86::double_sign_flip());
 #endif
 
   // Blobs
