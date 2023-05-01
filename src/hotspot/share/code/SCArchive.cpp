@@ -92,6 +92,7 @@ void SCArchive::initialize() {
       FREE_C_HEAP_ARRAY(char, cp);
     }
     FLAG_SET_DEFAULT(FoldStableValues, false);
+    FLAG_SET_DEFAULT(ForceUnreachable, true);
   }
 }
 
@@ -483,6 +484,7 @@ bool SCAFile::load_stub(StubCodeGenerator* cgen, vmIntrinsicID id, const char* n
     archive->set_failed();
     return false;
   }
+  log_info(sca,stubs)("Reading stub '%s' id:%d from shared code archive '%s'", name, (int)id, archive->_archive_path);
   // Read code
   uint code_offset = entry_position + entry->code_offset();
   uint code_size   = entry->code_size();
@@ -503,6 +505,7 @@ bool SCAFile::store_stub(StubCodeGenerator* cgen, vmIntrinsicID id, const char* 
   if (archive == nullptr) {
     return false;
   }
+  log_info(sca, stubs)("Writing stub '%s' id:%d to shared code archive '%s'", name, (int)id, archive->_archive_path);
   if (!archive->align_write()) {
     return false;
   }
@@ -748,7 +751,9 @@ bool SCAFile::read_relocations(CodeBuffer* buffer, CodeBuffer* orig_buffer,
       success = false;
       break;
     }
-
+    if (UseNewCode3) {
+      tty->print_cr("======== read relocations [%d]:", reloc_count);
+    }
     RelocIterator iter(cs);
     int j = 0;
     while (iter.next()) {
@@ -801,7 +806,6 @@ bool SCAFile::read_relocations(CodeBuffer* buffer, CodeBuffer* orig_buffer,
         case relocInfo::virtual_call_type:   // Fall through. They all call resolve_*_call blobs.
         case relocInfo::opt_virtual_call_type:
         case relocInfo::static_call_type: {
-          iter.reloc()->fix_relocation_after_move(orig_buffer, buffer);
           address dest = _table->address_for_id(reloc_data[j]);
           if (dest != (address)-1) {
             ((CallRelocation*)iter.reloc())->set_destination(dest);
@@ -812,7 +816,6 @@ bool SCAFile::read_relocations(CodeBuffer* buffer, CodeBuffer* orig_buffer,
           iter.reloc()->fix_relocation_after_move(orig_buffer, buffer);
           break;
         case relocInfo::runtime_call_type: {
-          iter.reloc()->fix_relocation_after_move(orig_buffer, buffer);
           address dest = _table->address_for_id(reloc_data[j]);
           if (dest != (address)-1) {
             ((CallRelocation*)iter.reloc())->set_destination(dest);
@@ -860,6 +863,9 @@ bool SCAFile::read_relocations(CodeBuffer* buffer, CodeBuffer* orig_buffer,
         default:
           fatal("relocation %d unimplemented", (int)iter.type());
           break;
+      }
+      if (UseNewCode3) {
+        iter.print_current();
       }
       j++;
     }
@@ -951,6 +957,8 @@ if (UseNewCode2) {
     FREE_C_HEAP_ARRAY(char, name);
     return false;
   }
+  log_info(sca, stubs)("Reading blob '%s' from shared code archive '%s'", name, archive->_archive_path);
+
   if (strncmp(buffer->name(), name, (name_size - 1)) != 0) {
     log_warning(sca)("Saved stub's name '%s' is different from '%s'", name, buffer->name());
     archive->set_failed();
@@ -1181,6 +1189,8 @@ bool SCAFile::store_exception_blob(CodeBuffer* buffer, int pc_offset) {
   if (archive == nullptr) {
     return false;
   }
+  log_info(sca, stubs)("Writing blob '%s' to shared code archive '%s'", buffer->name(), archive->_archive_path);
+
 #ifdef ASSERT
 if (UseNewCode2) {
   FlagSetting fs(PrintRelocations, true);
