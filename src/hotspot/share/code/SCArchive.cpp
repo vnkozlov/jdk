@@ -145,7 +145,7 @@ bool SCArchive::open_for_read(const char* archive_path) {
     log_info(sca)("Opened for read shared code archive '%s'", archive_path);
   }
   SCAFile* archive = new SCAFile(archive_path, fd, (uint)st.st_size, true /* for_read */);
-  if (archive->fd() < 0) { // failed
+  if (archive->failed()) {
     delete archive;
     _archive = nullptr;
     return false;
@@ -169,7 +169,7 @@ bool SCArchive::open_for_write(const char* archive_path) {
     log_info(sca)("Opened for write shared code archive '%s'", archive_path);
   }
   SCAFile* archive = new SCAFile(archive_path, fd, 0, false /* for_read */);
-  if (archive->fd() < 0) { // failed
+  if (archive->failed()) {
     delete archive;
     _archive = nullptr;
     return false;
@@ -177,6 +177,8 @@ bool SCArchive::open_for_write(const char* archive_path) {
   _archive = archive;
   return true;
 }
+
+#define DATA_ALIGNMENT HeapWordSize
 
 SCAFile::SCAFile(const char* archive_path, int fd, uint file_size, bool for_read) {
   _archive_path = archive_path;
@@ -188,38 +190,40 @@ SCAFile::SCAFile(const char* archive_path, int fd, uint file_size, bool for_read
   _lookup_failed = false;
   _table = nullptr;
   _entries = nullptr;
-  _write_entries = nullptr;
-  _C_strings_buf = nullptr;
+  _write_entries  = nullptr;
+  _C_strings_buf  = nullptr;
+  _archive_buffer = nullptr;
   _target = nullptr;
 
-  // Read header st the begining of archive
+  // Read header at the begining of archive
   uint header_size = sizeof(SCAHeader);
   if (for_read) {
-    // Read header from archive
-    if (!seek_to_position(0)) {
+    // Read archive
+    char* buf = NEW_C_HEAP_ARRAY(char, file_size + DATA_ALIGNMENT, mtCode);
+    _archive_buffer = align_up(buf, DATA_ALIGNMENT); 
+    uint n = (uint)::read(_fd, _archive_buffer, file_size);
+    if (n != file_size) {
+      log_warning(sca)("Failed to read %d bytes at offset %d from shared code archive file '%s'", file_size, _file_offset, _archive_path);
+      set_failed();
       return;
     }
-    uint n = read_bytes((void*)&_header, header_size);
-    if (n != header_size) {
-      return;
-    }
-    assert(_header.version() == VM_Version::jvm_version(), "sanity");
-    assert(_header.archive_size() <= file_size, "recorded %d vs actual %d", _header.archive_size(), file_size);
+    log_debug(sca)("Read %d bytes at offset %d from shared code archive '%s'", file_size, _file_offset, _archive_path);
+
+    _header = (SCAHeader*)(_archive_buffer + _file_offset);
+    assert(_header->version() == VM_Version::jvm_version(), "sanity");
+    assert(_header->archive_size() <= file_size, "recorded %d vs actual %d", _header->archive_size(), file_size);
     log_info(sca)("Read header from shared code archive '%s'", archive_path);
 
     // Read strings
     if (!load_strings()) {
       return;
     }
-    uint strings_count  = _header.strings_count();
-    uint strings_offset = _header.strings_offset();
-    uint strings_size   = _header.entries_offset() - strings_offset;
-    
   } else {
+    _header = new SCAHeader();
     // Write initial version of header
-    _header.init(VM_Version::jvm_version(), 0 /* entry_count */, 0 /* archive_size */, 0 /* entries_offset */, 0, 0);
+    _header->init(VM_Version::jvm_version(), 0 /* entry_count */, 0 /* archive_size */, 0 /* entries_offset */, 0, 0);
     uint header_size = sizeof(SCAHeader);
-    uint n = write_bytes((const void*)&_header, header_size);
+    uint n = write_bytes((const void*)_header, header_size);
     if (n != header_size) {
       return;
     }
@@ -246,6 +250,9 @@ SCAFile::~SCAFile() {
   if (_fd < 0) {
     return; // Already closed
   }
+  // Prevent writing code into archive while we are closing it.
+  MutexLocker ml(Compile_lock);
+
   if (open_for_write()) { // Finalize archive
     finish_write();
   }
@@ -255,11 +262,19 @@ SCAFile::~SCAFile() {
   _fd = -1;
   log_info(sca)("Closed shared code archive '%s'", _archive_path);
   FREE_C_HEAP_ARRAY(char, _archive_path);
-  if (_C_strings_buf != nullptr) {
+  if (_header != nullptr && !_for_read) {
+    delete _header;
+    _header = nullptr;
+  }
+  if (_archive_buffer != nullptr && !_for_read) {
+    FREE_C_HEAP_ARRAY(char, _archive_buffer);
+    _archive_buffer = nullptr;
+  }
+  if (_C_strings_buf != nullptr && !_for_read) {
     FREE_C_HEAP_ARRAY(char, _C_strings_buf);
     _C_strings_buf = nullptr;
   }
-  if (_entries != nullptr) {
+  if (_entries != nullptr && !_for_read) {
     FREE_C_HEAP_ARRAY(SCAEntry, _entries);
     _entries = nullptr;
   }
@@ -318,8 +333,8 @@ static char align_buffer[256] = { 0 };
 bool SCAFile::align_write() {
   // We are not executing code from archive - we copy it by bytes first.
   // No need for big alignment (or at all).
-  uint padding = sizeof(uint) - (_file_offset & (sizeof(uint) - 1));
-  if (padding == 0) {
+  uint padding = DATA_ALIGNMENT - (_file_offset & (DATA_ALIGNMENT - 1));
+  if (padding == DATA_ALIGNMENT) {
     return true;
   }
   uint n = write_bytes((const void*)&align_buffer, padding);
@@ -364,6 +379,17 @@ uint SCAFile::write_bytes(const void* buffer, uint nbytes) {
   return n;
 }
 
+void copy_bytes(const char* from, address to, uint size) {
+  if ((size > 2 * HeapWordSize) && (((intptr_t)from | (intptr_t)to) & (HeapWordSize - 1)) == 0) {
+    // Use wordwise copies if possible:
+    Copy::disjoint_words((HeapWord*)from,
+                         (HeapWord*)to,
+                         ((size_t)size + HeapWordSize-1) / HeapWordSize);
+  } else {
+    Copy::conjoint_jbytes(from, to, (size_t)size);
+  }
+}
+
 void SCAFile::add_entry(SCAEntry entry) {
   if (_write_entries == nullptr) {
     _write_entries = new(mtCode) GrowableArray<SCAEntry>(4, mtCode); // C heap
@@ -373,21 +399,11 @@ void SCAFile::add_entry(SCAEntry entry) {
 }
 
 SCAEntry* SCAFile::find_entry(SCAEntry::Kind kind, uint id, uint decomp) {
-  uint count = _header.entries_count();
+  uint count = _header->entries_count();
   if (_entries == nullptr) {
     // Read it
-    if (!seek_to_position(_header.entries_offset())) {
-      return nullptr;
-    }
-    uint size  = sizeof(SCAEntry);
-    uint entries_size = count * size; // In bytes
-    _entries = NEW_C_HEAP_ARRAY(SCAEntry, count, mtCode);
-    uint n = read_bytes((void*)&(_entries[0]), entries_size);
-    if (n != entries_size) {
-      _entries = nullptr;
-      return nullptr;
-    }
-    log_info(sca)("Read %d SCAEntry entries at offset %d from shared code archive '%s'", count, _header.entries_offset(), _archive_path);
+    _entries = (SCAEntry*)(_archive_buffer + _header->entries_offset());
+    log_info(sca)("Read %d SCAEntry entries at offset %d from shared code archive '%s'", count, _header->entries_offset(), _archive_path);
   }
   for(uint i = 0; i < count; i++) {
     SCAEntry* entry = &(_entries[i]);
@@ -408,7 +424,7 @@ void SCAFile::invalidate(SCAEntry* entry) {
     return; // Someone invalidated it already
   }
 #ifdef ASSERT
-  uint count = _header.entries_count();
+  uint count = _header->entries_count();
   uint i = 0;
   for(; i < count; i++) {
     SCAEntry* entry = &(_entries[i]);
@@ -422,11 +438,17 @@ void SCAFile::invalidate(SCAEntry* entry) {
 }
 
 bool SCAFile::finish_write() {
-  uint version = _header.version();
+  uint version = _header->version();
   uint entries_offset = 0; // 0 is deafult if empty
+  if (!align_write()) {
+    return false;
+  }
   uint strings_offset = _file_offset;
   int strings_count = store_strings();
   if (strings_count < 0) {
+    return false;
+  }
+  if (!align_write()) {
     return false;
   }
   int count = _write_entries->length();
@@ -443,13 +465,13 @@ bool SCAFile::finish_write() {
   }
 
   // Finalize and write header
-  _header.init(version, count, _file_offset, entries_offset, (uint)strings_count, strings_offset);
+  _header->init(version, count, _file_offset, entries_offset, (uint)strings_count, strings_offset);
   if (!seek_to_position(0)) {
     return false;
   }
   _file_offset = 0;
   uint header_size = sizeof(SCAHeader);
-  uint n = write_bytes((const void*)&_header, header_size);
+  uint n = write_bytes(_header, header_size);
   if (n != header_size) {
     return false;
   }
@@ -469,16 +491,9 @@ bool SCAFile::load_stub(StubCodeGenerator* cgen, vmIntrinsicID id, const char* n
   }
   uint entry_position = entry->offset();
   // Read name
-  uint name_offset = entry_position + entry->name_offset();
+  uint name_offset = entry->name_offset();
   uint name_size   = entry->name_size(); // Includes '/0'
-  char*  saved_name  = NEW_C_HEAP_ARRAY(char, name_size, mtCode);
-  if (!archive->seek_to_position(name_offset)) {
-    return false;
-  }
-  uint n = archive->read_bytes(saved_name, name_size);
-  if (n != name_size) {
-    return false;
-  }
+  char*  saved_name  = (char*)(archive->_archive_buffer + name_offset);
   if (strncmp(name, saved_name, (name_size - 1)) != 0) {
     log_warning(sca)("Saved stub's name '%s' is different from '%s' for id:%d", saved_name, name, (int)id);
     archive->set_failed();
@@ -486,16 +501,10 @@ bool SCAFile::load_stub(StubCodeGenerator* cgen, vmIntrinsicID id, const char* n
   }
   log_info(sca,stubs)("Reading stub '%s' id:%d from shared code archive '%s'", name, (int)id, archive->_archive_path);
   // Read code
-  uint code_offset = entry_position + entry->code_offset();
+  uint code_offset = entry->code_offset();
   uint code_size   = entry->code_size();
-  if (!archive->seek_to_position(code_offset)) {
-    return false;
-  }
-  n = archive->read_bytes(start, code_size);
-  if (n != code_size) {
-    return false;
-  }
-  cgen->assembler()->code_section()->set_end(start + n);
+  copy_bytes((archive->_archive_buffer + code_offset), start, code_size);
+  cgen->assembler()->code_section()->set_end(start + code_size);
   log_info(sca,stubs)("Read stub '%s' id:%d from shared code archive '%s'", name, (int)id, archive->_archive_path);
   return true;
 }
@@ -511,25 +520,22 @@ bool SCAFile::store_stub(StubCodeGenerator* cgen, vmIntrinsicID id, const char* 
   }
   uint entry_position = archive->_file_offset;
 
-  // Write name
-  uint name_offset = 0; // Write name first
-  uint name_size = (uint)strlen(name) + 1; // Includes '/0'
-  uint n = archive->write_bytes(name, name_size);
-  if (n != name_size) {
-    return false;
-  }
-  if (!archive->align_write()) {
-    return false;
-  }
   // Write code
-  uint code_offset = archive->_file_offset - entry_position;
+  uint code_offset = entry_position;
   uint code_size = cgen->assembler()->pc() - start;
-  n = archive->write_bytes(start, code_size);
+  uint n = archive->write_bytes(start, code_size);
   if (n != code_size) {
     return false;
   }
+  // Write name
+  uint name_offset = archive->_file_offset;
+  uint name_size = (uint)strlen(name) + 1; // Includes '/0'
+  n = archive->write_bytes(name, name_size);
+  if (n != name_size) {
+    return false;
+  }
   SCAEntry entry(entry_position, name_offset, name_size, code_offset, code_size, 0, 0,
-                 SCAEntry::Stub, (uint32_t)id, archive->_header.next_idx());
+                 SCAEntry::Stub, (uint32_t)id, archive->_header->next_idx());
   archive->add_entry(entry);
   log_info(sca, stubs)("Wrote stub '%s' id:%d to shared code archive '%s'", name, (int)id, archive->_archive_path);
   return true;
@@ -866,9 +872,11 @@ bool SCAFile::read_relocations(CodeBuffer* buffer, CodeBuffer* orig_buffer,
           fatal("relocation %d unimplemented", (int)iter.type());
           break;
       }
+#ifdef ASSERT
       if (UseNewCode3) {
         iter.print_current();
       }
+#endif
       j++;
     }
     assert(j <= (int)reloc_count, "sanity");
@@ -1238,7 +1246,7 @@ if (UseNewCode2) {
 
   SCAEntry entry(entry_position, name_offset, name_size,
                  code_offset, code_size, reloc_offset, reloc_size,
-                 SCAEntry::Blob, (uint32_t)999, archive->_header.next_idx());
+                 SCAEntry::Blob, (uint32_t)999, archive->_header->next_idx());
   archive->add_entry(entry);
   log_info(sca, stubs)("Wrote stub '%s' to shared code archive '%s'", name, archive->_archive_path);
   return true;
@@ -1922,7 +1930,7 @@ bool SCAFile::store_nmethod(const methodHandle& method,
   }
   SCAFile* archive = open_for_write();
   if (archive == nullptr) {
-    return false;
+    return false; // Archive is closed
   }
 #ifdef ASSERT
 if (UseNewCode3) {
@@ -2064,7 +2072,7 @@ if (UseNewCode3) {
   uint decomp = (method->method_data() == nullptr) ? 0 : method->method_data()->decompile_count();
   SCAEntry entry(entry_position, name_offset, name_size,
                  code_offset, code_size, reloc_offset, reloc_size,
-                 SCAEntry::Code, hash, archive->_header.next_idx(), decomp);
+                 SCAEntry::Code, hash, archive->_header->next_idx(), decomp);
   archive->add_entry(entry);
   {
     ResourceMark rm;
@@ -2113,6 +2121,7 @@ void SCATable::init() {
 
 #ifndef PRODUCT
   SET_ADDRESS(_extrs, &SharedRuntime::_partial_subtype_ctr);
+  SET_ADDRESS(_extrs, JavaThread::verify_cross_modify_fence_failure);
 #endif
 
 #if defined(AMD64) || defined(AARCH64) || defined(RISCV64)
@@ -2254,6 +2263,16 @@ void SCATable::init() {
   SET_ADDRESS(_stubs, StubRoutines::x86::double_sign_mask());
   SET_ADDRESS(_stubs, StubRoutines::x86::double_sign_flip());
 #endif
+#if defined(AARCH64)
+  SET_ADDRESS(_stubs, StubRoutines::aarch64::d2i_fixup());
+  SET_ADDRESS(_stubs, StubRoutines::aarch64::f2i_fixup());
+  SET_ADDRESS(_stubs, StubRoutines::aarch64::d2l_fixup());
+  SET_ADDRESS(_stubs, StubRoutines::aarch64::f2l_fixup());
+  SET_ADDRESS(_stubs, StubRoutines::aarch64::float_sign_mask());
+  SET_ADDRESS(_stubs, StubRoutines::aarch64::float_sign_flip());
+  SET_ADDRESS(_stubs, StubRoutines::aarch64::double_sign_mask());
+  SET_ADDRESS(_stubs, StubRoutines::aarch64::double_sign_flip());
+#endif
 
   // Blobs
   SET_ADDRESS(_blobs, SharedRuntime::get_handle_wrong_method_stub());
@@ -2322,37 +2341,24 @@ static const char* _C_strings[MAX_STR_COUNT] = {nullptr};
 static int _C_strings_count = 0;
 
 bool SCAFile::load_strings() {
-  uint strings_count  = _header.strings_count();
+  uint strings_count  = _header->strings_count();
   if (strings_count == 0) {
     return true;
   }
-  uint strings_offset = _header.strings_offset();
-  uint strings_size   = _header.entries_offset() - strings_offset;
-  if (!seek_to_position(strings_offset)) {
-    return false;
-  }
-  // Read sizes first
+  uint strings_offset = _header->strings_offset();
+  uint strings_size   = _header->entries_offset() - strings_offset;
   uint sizes_size = (uint)(strings_count * sizeof(uint));
-  uint* sizes = NEW_C_HEAP_ARRAY(uint, sizes_size, mtCode);
-  uint n = read_bytes(sizes, sizes_size);
-  if (n != sizes_size) {
-    return false;
-  }
+  uint* sizes = (uint*)(_archive_buffer + strings_offset);
   strings_size -= sizes_size;
-  _C_strings_buf = NEW_C_HEAP_ARRAY(char, strings_size, mtCode);
-  n = read_bytes(_C_strings_buf, strings_size);
-  if (n != strings_size) {
-    return false;
-  }
+  _C_strings_buf = (char*)(_archive_buffer + strings_offset + sizes_size);
   char* p = _C_strings_buf;
   assert(strings_count <= MAX_STR_COUNT, "sanity");
   for (uint i = 0; i < strings_count; i++) {
     _C_strings[i] = (const char*)p;
     p += sizes[i];
   }
-  assert((p - _C_strings_buf) == strings_size, "sanity");
+  assert((p - _C_strings_buf) <= strings_size, "sanity");
   _C_strings_count = strings_count;
-  FREE_C_HEAP_ARRAY(uint, sizes);
   return true;
 }
 

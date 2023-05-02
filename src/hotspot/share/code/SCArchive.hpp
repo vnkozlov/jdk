@@ -45,7 +45,7 @@ template <typename T> class GrowableArray;
 enum class vmIntrinsicID : int;
 
 // Archive file header
-class SCAHeader {
+class SCAHeader : public CHeapObj<mtCode> {
 private:
   // Here should be version and other verification fields
   uint _version;           // JDK version (should match when reading archive)
@@ -175,7 +175,7 @@ public:
 
 class SCAFile : public CHeapObj<mtCode> {
 private:
-  SCAHeader   _header;
+  SCAHeader*  _header;
   const char* _archive_path;
   uint        _file_size;    // Used when reading archive
   uint        _file_offset;
@@ -191,6 +191,8 @@ private:
 
   char* _C_strings_buf; // Loaded buffer for _C_strings[] table
 
+  char* _archive_buffer;   // Loaded Archive
+
   ciMethod* _target; // Current compiled method
 
   void set_target(ciMethod* target) { _target = target; }
@@ -205,7 +207,6 @@ private:
   uint write_bytes(const void* buffer, uint nbytes);
 
   void set_failed()   { _failed = true; }
-  bool failed() const { return _failed; }
 
   void set_lookup_failed()     { _lookup_failed = true; }
   void clear_lookup_failed()   { _lookup_failed = false; }
@@ -225,6 +226,8 @@ private:
 public:
   SCAFile(const char* archive_path, int fd, uint file_size, bool for_read);
   ~SCAFile();
+
+  bool failed() const { return _failed; }
 
   bool load_strings();
   int store_strings();
