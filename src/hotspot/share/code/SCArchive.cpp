@@ -50,6 +50,7 @@
 #include "runtime/handles.inline.hpp"
 #include "runtime/jniHandles.inline.hpp"
 #include "runtime/os.inline.hpp"
+#include "runtime/sharedRuntime.hpp"
 #include "runtime/stubCodeGenerator.hpp"
 #include "runtime/stubRoutines.hpp"
 #include "runtime/threadIdentifier.hpp"
@@ -209,7 +210,7 @@ SCAFile::SCAFile(const char* archive_path, int fd, uint file_size, bool for_read
     }
     log_debug(sca)("Read %d bytes at offset %d from shared code archive '%s'", file_size, _file_offset, _archive_path);
 
-    _header = (SCAHeader*)(_archive_buffer + _file_offset);
+    _header = (SCAHeader*)addr(_file_offset);
     assert(_header->version() == VM_Version::jvm_version(), "sanity");
     assert(_header->archive_size() <= file_size, "recorded %d vs actual %d", _header->archive_size(), file_size);
     log_info(sca)("Read header from shared code archive '%s'", archive_path);
@@ -380,14 +381,18 @@ uint SCAFile::write_bytes(const void* buffer, uint nbytes) {
 }
 
 void copy_bytes(const char* from, address to, uint size) {
+  assert(size > 0, "sanity");
+  bool by_words = true;
   if ((size > 2 * HeapWordSize) && (((intptr_t)from | (intptr_t)to) & (HeapWordSize - 1)) == 0) {
     // Use wordwise copies if possible:
     Copy::disjoint_words((HeapWord*)from,
                          (HeapWord*)to,
                          ((size_t)size + HeapWordSize-1) / HeapWordSize);
   } else {
+    by_words = false;
     Copy::conjoint_jbytes(from, to, (size_t)size);
   }
+  log_debug(sca)("Copied %d bytes as %s from " INTPTR_FORMAT " to " INTPTR_FORMAT, size, (by_words ? "HeapWord" : "bytes"), p2i(from), p2i(to));
 }
 
 void SCAFile::add_entry(SCAEntry entry) {
@@ -402,7 +407,7 @@ SCAEntry* SCAFile::find_entry(SCAEntry::Kind kind, uint id, uint decomp) {
   uint count = _header->entries_count();
   if (_entries == nullptr) {
     // Read it
-    _entries = (SCAEntry*)(_archive_buffer + _header->entries_offset());
+    _entries = (SCAEntry*)addr(_header->entries_offset());
     log_info(sca)("Read %d SCAEntry entries at offset %d from shared code archive '%s'", count, _header->entries_offset(), _archive_path);
   }
   for(uint i = 0; i < count; i++) {
@@ -493,7 +498,7 @@ bool SCAFile::load_stub(StubCodeGenerator* cgen, vmIntrinsicID id, const char* n
   // Read name
   uint name_offset = entry->name_offset();
   uint name_size   = entry->name_size(); // Includes '/0'
-  char*  saved_name  = (char*)(archive->_archive_buffer + name_offset);
+  char*  saved_name  = archive->addr(name_offset);
   if (strncmp(name, saved_name, (name_size - 1)) != 0) {
     log_warning(sca)("Saved stub's name '%s' is different from '%s' for id:%d", saved_name, name, (int)id);
     archive->set_failed();
@@ -503,7 +508,7 @@ bool SCAFile::load_stub(StubCodeGenerator* cgen, vmIntrinsicID id, const char* n
   // Read code
   uint code_offset = entry->code_offset();
   uint code_size   = entry->code_size();
-  copy_bytes((archive->_archive_buffer + code_offset), start, code_size);
+  copy_bytes(archive->addr(code_offset), start, code_size);
   cgen->assembler()->code_section()->set_end(start + code_size);
   log_info(sca,stubs)("Read stub '%s' id:%d from shared code archive '%s'", name, (int)id, archive->_archive_path);
   return true;
@@ -885,31 +890,27 @@ bool SCAFile::read_relocations(CodeBuffer* buffer, CodeBuffer* orig_buffer,
   return success;
 }
 
-bool SCAFile::read_code(CodeBuffer* buffer, CodeBuffer* orig_buffer) {
+bool SCAFile::read_code(CodeBuffer* buffer, CodeBuffer* orig_buffer, uint offset) {
+  assert(offset == align_up(offset, DATA_ALIGNMENT), "%d not aligned to %d", offset, DATA_ALIGNMENT);
   assert(buffer->blob() != nullptr, "sanity");
+  SCACodeSection* sca_cs = (SCACodeSection*)addr(offset);
   for (int i = 0; i < (int)CodeBuffer::SECT_LIMIT; i++) {
     CodeSection* cs = buffer->code_section(i);
     // Read original section size and address.
-    uint orig_size = 0;
-    uint n = read_bytes(&orig_size, sizeof(uint));
-    if (n != sizeof(uint)) {
-      return false;
-    }
+    uint orig_size = sca_cs[i]._size;
+    uint orig_size_align = align_up(orig_size, DATA_ALIGNMENT);
     if (i != (int)CodeBuffer::SECT_INSTS) {
-      buffer->initialize_section_size(cs, orig_size);
+      buffer->initialize_section_size(cs, orig_size_align);
     }
-    if (orig_size > (uint)cs->capacity()) { // Will not fit
+    if (orig_size_align > (uint)cs->capacity()) { // Will not fit
+      log_warning(sca)("original code section %d size %d > current capacity %d", i, orig_size, cs->capacity());
       return false;
     }
     if (orig_size == 0) {
       assert(cs->size() == 0, "should match");
       continue;  // skip trivial section
     }
-    address orig_start;
-    n = read_bytes(&orig_start, sizeof(address));
-    if (n != sizeof(address)) {
-      return false;
-    }
+    address orig_start = sca_cs[i]._origin_address;
 
     // Populate fake original buffer (no code allocation in CodeCache).
     // It is used for relocations to calculate sections addesses delta.
@@ -919,10 +920,7 @@ bool SCAFile::read_code(CodeBuffer* buffer, CodeBuffer* orig_buffer) {
 
     // Load code to new buffer.
     address code_start = cs->start();
-    n = read_bytes(code_start, orig_size);
-    if (n != orig_size) {
-      return false;
-    }
+    copy_bytes(addr(sca_cs[i]._offset), code_start, orig_size_align);
     cs->set_end(code_start + orig_size);
   }
 
@@ -975,16 +973,11 @@ if (UseNewCode2) {
     return false;
   }
 
-  uint code_offset = entry_position + entry->code_offset();
-  if (!archive->seek_to_position(code_offset)) {
-    return false;
-  }
-
   // Create fake original CodeBuffer
   CodeBuffer orig_buffer(name);
 
   // Read code
-  if (!archive->read_code(buffer, &orig_buffer)) {
+  if (!archive->read_code(buffer, &orig_buffer, entry->code_offset())) {
     return false;
   }
 
@@ -1162,34 +1155,50 @@ bool SCAFile::write_relocations(CodeBuffer* buffer, uint& max_reloc_size) {
 }
 
 bool SCAFile::write_code(CodeBuffer* buffer, uint& code_size) {
+  assert(_file_offset == align_up(_file_offset, DATA_ALIGNMENT), "%d not aligned to %d", _file_offset, DATA_ALIGNMENT);
   assert(buffer->blob() != nullptr, "sanity");
+  uint code_offset = _file_offset;
+  uint cb_total_size = (uint)buffer->total_content_size();
+  // Write information about Code sections first.
+  SCACodeSection sca_cs[CodeBuffer::SECT_LIMIT];
+  uint sca_cs_size = (uint)(sizeof(SCACodeSection) * CodeBuffer::SECT_LIMIT);
+  uint offset = align_up(sca_cs_size, DATA_ALIGNMENT);
   uint total_size = 0;
   for (int i = 0; i < (int)CodeBuffer::SECT_LIMIT; i++) {
     const CodeSection* cs = buffer->code_section(i);
+    assert(cs->mark() == nullptr, "CodeSection::_mark is not implemented");
     uint cs_size = (uint)cs->size();
-    uint n = write_bytes(&cs_size, sizeof(uint));
-    if (n != sizeof(uint)) {
-      return false;
-    }
+    sca_cs[i]._size = cs_size;
+    sca_cs[i]._origin_address = (cs_size == 0) ? nullptr : cs->start();
+    sca_cs[i]._offset = (cs_size == 0) ? 0 : (code_offset + offset + total_size);
+    assert(cs->mark() == nullptr, "CodeSection::_mark is not implemented");
+    total_size += align_up(cs_size, DATA_ALIGNMENT);
+  }
+  uint n = write_bytes(sca_cs, sca_cs_size);
+  if (n != sca_cs_size) {
+    return false;
+  }
+  if (!align_write()) {
+    return false;
+  }
+  assert(_file_offset == (code_offset + offset), "%d  != (%d + %d)", _file_offset, code_offset, offset);
+  for (int i = 0; i < (int)CodeBuffer::SECT_LIMIT; i++) {
+    const CodeSection* cs = buffer->code_section(i);
+    uint cs_size = (uint)cs->size();
     if (cs_size == 0) {
       continue;  // skip trivial section
     }
-    assert(cs->mark() == nullptr, "CodeSection::_mark is not implemented");
-
-    // Write original address
-    address cs_start = cs->start();
-    n = write_bytes(&cs_start, sizeof(address));
-    if (n != sizeof(address)) {
-      return false;
-    }
-
+    assert(_file_offset == sca_cs[i]._offset, "%d != %d", _file_offset, sca_cs[i]._offset);
     // Write code
-    n = write_bytes(cs_start, cs_size);
+    n = write_bytes(cs->start(), cs_size);
     if (n != cs_size) {
       return false;
     }
-    total_size += cs_size;
+    if (!align_write()) {
+      return false;
+    }
   }
+  assert((_file_offset - code_offset) == (offset + total_size), "(%d - %d) != (%d + %d)", _file_offset, code_offset, offset, total_size);
   code_size = total_size;
   return true;
 }
@@ -1227,12 +1236,12 @@ if (UseNewCode2) {
   if (n != name_size) {
     return false;
   }
+
+  // Write code section
   if (!archive->align_write()) {
     return false;
   }
-
-  // Write code section
-  uint code_offset = archive->_file_offset - entry_position;
+  uint code_offset = archive->_file_offset;
   uint code_size = 0;
   if (!archive->write_code(buffer, code_size)) {
     return false;
@@ -1865,7 +1874,7 @@ if (UseNewCode3) tty->print_cr("=== load_nmethod: 5");
   CodeBuffer orig_buffer(name);
 
   // Read code
-  if (!archive->read_code(&buffer, &orig_buffer)) {
+  if (!archive->read_code(&buffer, &orig_buffer, align_up(archive->_file_offset, DATA_ALIGNMENT))) {
     return false;
   }
 
@@ -2055,6 +2064,9 @@ if (UseNewCode3) {
   }
 
   // Write code section
+  if (!archive->align_write()) {
+    return false;
+  }
   uint code_size = 0;
   if (!archive->write_code(buffer, code_size)) {
     return false;
@@ -2348,16 +2360,16 @@ bool SCAFile::load_strings() {
   uint strings_offset = _header->strings_offset();
   uint strings_size   = _header->entries_offset() - strings_offset;
   uint sizes_size = (uint)(strings_count * sizeof(uint));
-  uint* sizes = (uint*)(_archive_buffer + strings_offset);
+  uint* sizes = (uint*)addr(strings_offset);
   strings_size -= sizes_size;
-  _C_strings_buf = (char*)(_archive_buffer + strings_offset + sizes_size);
+  _C_strings_buf = addr(strings_offset + sizes_size);
   char* p = _C_strings_buf;
   assert(strings_count <= MAX_STR_COUNT, "sanity");
   for (uint i = 0; i < strings_count; i++) {
     _C_strings[i] = (const char*)p;
     p += sizes[i];
   }
-  assert((p - _C_strings_buf) <= strings_size, "sanity");
+  assert((uint)(p - _C_strings_buf) <= strings_size, "sanity");
   _C_strings_count = strings_count;
   return true;
 }

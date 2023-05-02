@@ -173,6 +173,13 @@ public:
   address address_for_id(int id);
 };
 
+struct SCACodeSection {
+public:
+  address _origin_address;
+  uint _size;
+  uint _offset;
+};
+
 class SCAFile : public CHeapObj<mtCode> {
 private:
   SCAHeader*  _header;
@@ -229,6 +236,8 @@ public:
 
   bool failed() const { return _failed; }
 
+  char* addr(uint offset) const { return _archive_buffer + offset; }
+
   bool load_strings();
   int store_strings();
 
@@ -256,7 +265,7 @@ public:
   bool write_klass(Klass* klass);
   bool write_method(Method* method);
 
-  bool read_code(CodeBuffer* buffer, CodeBuffer* orig_buffer);
+  bool read_code(CodeBuffer* buffer, CodeBuffer* orig_buffer, uint offset);
   bool read_relocations(CodeBuffer* buffer, CodeBuffer* orig_buffer, uint reloc_size, OopRecorder* oop_recorder);
   bool write_code(CodeBuffer* buffer, uint& code_size);
   bool write_relocations(CodeBuffer* buffer, uint& reloc_size);
