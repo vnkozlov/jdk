@@ -45,6 +45,7 @@
 #include "memory/universe.hpp"
 #include "oops/klass.inline.hpp"
 #include "oops/method.inline.hpp"
+#include "runtime/atomic.hpp"
 #include "runtime/flags/flagSetting.hpp"
 #include "runtime/globals_extension.hpp"
 #include "runtime/handles.inline.hpp"
@@ -194,7 +195,6 @@ SCAFile::SCAFile(const char* archive_path, int fd, uint file_size, bool for_read
   _write_entries  = nullptr;
   _C_strings_buf  = nullptr;
   _archive_buffer = nullptr;
-  _target = nullptr;
 
   // Read header at the begining of archive
   uint header_size = sizeof(SCAHeader);
@@ -210,7 +210,7 @@ SCAFile::SCAFile(const char* archive_path, int fd, uint file_size, bool for_read
     }
     log_debug(sca)("Read %d bytes at offset %d from shared code archive '%s'", file_size, _file_offset, _archive_path);
 
-    _header = (SCAHeader*)addr(_file_offset);
+    _header = (SCAHeader*)addr(0);
     assert(_header->version() == VM_Version::jvm_version(), "sanity");
     assert(_header->archive_size() <= file_size, "recorded %d vs actual %d", _header->archive_size(), file_size);
     log_info(sca)("Read header from shared code archive '%s'", archive_path);
@@ -230,7 +230,7 @@ SCAFile::SCAFile(const char* archive_path, int fd, uint file_size, bool for_read
     }
     log_info(sca)("Wrote initial header to shared code archive '%s'", archive_path);
   }
-  _table = new SCATable();
+  _table = new SCAddressTable();
 }
 
 void SCAFile::init_table() {
@@ -247,20 +247,43 @@ void SCAFile::init_opto_table() {
   }
 }
 
+static volatile int _reading_nmethod = 0;
+
+class ReadingMark {
+public:
+  ReadingMark() {
+    Atomic::inc(&_reading_nmethod);
+  }
+  ~ReadingMark() {
+    Atomic::dec(&_reading_nmethod);
+  }
+};
+
 SCAFile::~SCAFile() {
   if (_fd < 0) {
     return; // Already closed
   }
-  // Prevent writing code into archive while we are closing it.
-  MutexLocker ml(Compile_lock);
-
   if (open_for_write()) { // Finalize archive
     finish_write();
   }
-  if (::close(_fd) < 0) {
-    log_warning(sca)("Failed to close shared code archive file '%s'", _archive_path);
+  int fd = _fd;
+  _fd = -1; // This will stop any access to archive because it is checked
+            // on entry to load_nmethod() and store_nmethod();
+if (UseNewCode) tty->print_cr("closing archive: 0");
+  if (_for_read && _reading_nmethod > 0) {
+    // Wait for all load_nmethod() finish.
+    MonitorLocker locker(Compilation_lock, Mutex::_no_safepoint_check_flag);
+    while (_reading_nmethod > 0) {
+      locker.wait(10); // Wait 10 ms
+    }
   }
-  _fd = -1;
+if (UseNewCode) tty->print_cr("closing archive: 1");
+  // Prevent writing code into archive while we are closing it.
+  MutexLocker ml(Compile_lock);
+  if (::close(fd) < 0) {
+    log_warning(sca)("Failed to close shared code archive file '%s'", _archive_path);
+  } 
+
   log_info(sca)("Closed shared code archive '%s'", _archive_path);
   FREE_C_HEAP_ARRAY(char, _archive_path);
   if (_header != nullptr && !_for_read) {
@@ -296,7 +319,6 @@ bool SCAFile::for_write() const { return (_fd >= 0) && !_for_read && !_failed; }
 SCAFile* SCAFile::open_for_read() {
   SCAFile* archive = SCArchive::archive();
   if (archive != nullptr && archive->for_read()) {
-    archive->clear_lookup_failed(); // Reset bit
     return archive;
   }
   return nullptr;
@@ -309,6 +331,14 @@ SCAFile* SCAFile::open_for_write() {
     return archive;
   }
   return nullptr;
+}
+
+void SCAReader::set_read_position(uint pos) {
+  if (pos == _read_position) {
+    return;
+  } 
+  assert(pos < _archive->file_size(), "offset:%d >= file size:%d", pos, _archive->file_size());
+  _read_position = pos;
 }
 
 bool SCAFile::seek_to_position(uint pos) {
@@ -345,24 +375,6 @@ bool SCAFile::align_write() {
   log_debug(sca)("Adjust write alignment in shared code archive '%s'", _archive_path);
   return true;
 }
-
-uint SCAFile::read_bytes(void* buffer, uint nbytes) {
-  assert(for_read(), "Archive file is not open");
-  if (nbytes == 0) {
-    return 0;
-  }
-  assert((_file_offset + nbytes) <= _file_size, "Reading %d bytes from offset:%d > file size:%d", nbytes, _file_offset, _file_size);
-  uint n = (uint)::read(_fd, buffer, nbytes);
-  if (n != nbytes) {
-    log_warning(sca)("Failed to read %d bytes at offset %d from shared code archive file '%s'", nbytes, _file_offset, _archive_path);
-    set_failed();
-    return 0;
-  }
-  log_debug(sca)("Read %d bytes at offset %d from shared code archive '%s'", nbytes, _file_offset, _archive_path);
-  _file_offset += n;
-  return nbytes;
-}
-
 
 uint SCAFile::write_bytes(const void* buffer, uint nbytes) {
   assert(for_write(), "Archive file is not created");
@@ -498,7 +510,7 @@ bool SCAFile::load_stub(StubCodeGenerator* cgen, vmIntrinsicID id, const char* n
   // Read name
   uint name_offset = entry->name_offset();
   uint name_size   = entry->name_size(); // Includes '/0'
-  char*  saved_name  = archive->addr(name_offset);
+  const char* saved_name = archive->addr(name_offset);
   if (strncmp(name, saved_name, (name_size - 1)) != 0) {
     log_warning(sca)("Saved stub's name '%s' is different from '%s' for id:%d", saved_name, name, (int)id);
     archive->set_failed();
@@ -546,21 +558,14 @@ bool SCAFile::store_stub(StubCodeGenerator* cgen, vmIntrinsicID id, const char* 
   return true;
 }
 
-Klass* SCAFile::read_klass(const methodHandle& comp_method) {
-  int name_length = 0;
-  uint n = read_bytes(&name_length, sizeof(int));
-  if (n != sizeof(int)) {
-    return nullptr;
-  }
-  ResourceMark rm;
-  int total_length = name_length + 1;
-  char* dest = NEW_RESOURCE_ARRAY(char, total_length);
-  n = read_bytes(dest, total_length);
-  if (n != (uint)total_length) {
-    return nullptr;
-  }
+Klass* SCAReader::read_klass(const methodHandle& comp_method) {
+  uint code_offset = read_position();
+  int name_length = *(int*)addr(code_offset);
+  code_offset += sizeof(int);
+  const char* dest = addr(code_offset);
+  code_offset += name_length + 1;
+  set_read_position(code_offset);
   TempNewSymbol klass_sym = SymbolTable::probe(&(dest[0]), name_length);
-  dest[name_length] = '\0';
   if (klass_sym == nullptr) {
     set_lookup_failed();
     log_info(sca)("Probe failed for class %s", &(dest[0]));
@@ -582,31 +587,19 @@ Klass* SCAFile::read_klass(const methodHandle& comp_method) {
   return k;
 }
 
-Method* SCAFile::read_method(const methodHandle& comp_method) {
-  int holder_length = 0;
-  uint n = read_bytes(&holder_length, sizeof(int));
-  if (n != sizeof(int)) {
-    return nullptr;
-  }
-  int name_length = 0;
-  n = read_bytes(&name_length, sizeof(int));
-  if (n != sizeof(int)) {
-    return nullptr;
-  }
-  int signat_length = 0;
-  n = read_bytes(&signat_length, sizeof(int));
-  if (n != sizeof(int)) {
-    return nullptr;
-  }
-  ResourceMark rm;
-  int total_length = holder_length + 1 + name_length + 1 + signat_length + 1;
-  char* dest = NEW_RESOURCE_ARRAY(char, total_length);
-  n = read_bytes(dest, total_length);
-  if (n != (uint)total_length) {
-    return nullptr;
-  }
+Method* SCAReader::read_method(const methodHandle& comp_method) {
+  uint code_offset = read_position();
+  int holder_length = *(int*)addr(code_offset);
+  code_offset += sizeof(int);
+  int name_length = *(int*)addr(code_offset);
+  code_offset += sizeof(int);
+  int signat_length = *(int*)addr(code_offset);
+  code_offset += sizeof(int);
+
+  const char* dest = addr(code_offset);
+  code_offset += holder_length + 1 + name_length + 1 + signat_length + 1;
+  set_read_position(code_offset);
   TempNewSymbol klass_sym = SymbolTable::probe(&(dest[0]), holder_length);
-  dest[holder_length] = '\0';
   if (klass_sym == nullptr) {
     set_lookup_failed();
     log_info(sca)("Probe failed for class %s", &(dest[0]));
@@ -626,8 +619,7 @@ Method* SCAFile::read_method(const methodHandle& comp_method) {
     return nullptr;
   }
   TempNewSymbol name_sym = SymbolTable::probe(&(dest[holder_length + 1]), name_length);
-  int pos = holder_length + 1 + name_length;
-  dest[pos++] = '\0';
+  int pos = holder_length + 1 + name_length + 1;
   TempNewSymbol sign_sym = SymbolTable::probe(&(dest[pos]), signat_length);
   if (name_sym == nullptr) {
     set_lookup_failed();
@@ -715,57 +707,52 @@ bool SCAFile::write_method(Method* method) {
   if (n != (uint)total_length) {
     return false;
   }
-  log_info(sca)("Write method: %s", dest);
+  log_info(sca)("Wrote method: %s", dest);
+  dest[holder_length] = '\0';
+  dest[holder_length + 1 + name_length] = '\0';
   return true;
 }
 
 // Repair the pc relative information in the code after load
-bool SCAFile::read_relocations(CodeBuffer* buffer, CodeBuffer* orig_buffer,
-                               uint max_reloc_size, OopRecorder* oop_recorder) {
+bool SCAReader::read_relocations(CodeBuffer* buffer, CodeBuffer* orig_buffer,
+                               uint max_reloc_size, OopRecorder* oop_recorder,
+                               ciMethod* target) {
   // Read max count
   uint max_reloc_count = max_reloc_size / sizeof(relocInfo);
+  if (UseNewCode) {
+    tty->print_cr("======== read relocations [%d]:", max_reloc_count);
+  }
   bool success = true;
-  uint* reloc_data = NEW_C_HEAP_ARRAY(uint, max_reloc_count, mtCode);
+  //uint* reloc_data = NEW_C_HEAP_ARRAY(uint, max_reloc_count, mtCode);
   for (int i = 0; i < (int)CodeBuffer::SECT_LIMIT; i++) {
-    int reloc_count = 0;
-    uint n = read_bytes(&reloc_count, sizeof(int));
-    if (n != sizeof(int)) {
-      success = false;
-      break;
-    }
+    uint code_offset = read_position();
+    int reloc_count = *(int*)addr(code_offset);
+    code_offset += sizeof(int);
     if (reloc_count == 0) {
+      set_read_position(code_offset);
       continue;
     }
     // Read _locs_point (as offset from start)
-    int locs_point_off = 0;
-    n = read_bytes(&locs_point_off, sizeof(int));
-    if (n != sizeof(int)) {
-      success = false;
-      break;
-    }
+    int locs_point_off = *(int*)addr(code_offset);
+    code_offset += sizeof(int);
     uint reloc_size = reloc_count * sizeof(relocInfo);
     CodeSection* cs  = buffer->code_section(i);
     if (cs->locs_capacity() < reloc_count) {
       cs->expand_locs(reloc_count);
     }
     relocInfo* reloc_start = cs->locs_start();
-    n = read_bytes(reloc_start, reloc_size);
-    if (n != reloc_size) {
-      success = false;
-      break;
-    }
+    copy_bytes(addr(code_offset), (address)reloc_start, reloc_size);
+    code_offset += reloc_size;
     cs->set_locs_end(reloc_start + reloc_count);
     cs->set_locs_point(cs->start() + locs_point_off);
 
     // Read additional relocation data: uint per relocation
     uint  data_size  = reloc_count * sizeof(uint);
-    n = read_bytes(reloc_data, data_size);
-    if (n != data_size) {
-      success = false;
-      break;
-    }
-    if (UseNewCode3) {
-      tty->print_cr("======== read relocations [%d]:", reloc_count);
+    uint* reloc_data = (uint*)addr(code_offset);
+    code_offset += data_size;
+    set_read_position(code_offset);
+    if (UseNewCode) {
+      tty->print_cr("======== read code sectoin %d relocations [%d]:", i, reloc_count);
     }
     RelocIterator iter(cs);
     int j = 0;
@@ -778,9 +765,9 @@ bool SCAFile::read_relocations(CodeBuffer* buffer, CodeBuffer* orig_buffer,
           oop_Relocation* r = (oop_Relocation*)iter.reloc();
           if (r->oop_is_immediate()) {
             assert(reloc_data[j] == (uint)j, "should be");
-            methodHandle comp_method(THREAD, target()->get_Method());
+            methodHandle comp_method(THREAD, target->get_Method());
             jobject jo = read_oop(THREAD, comp_method);
-            if (failed() || lookup_failed()) {
+            if (lookup_failed()) {
               success = false;
               break;
             }
@@ -801,9 +788,9 @@ bool SCAFile::read_relocations(CodeBuffer* buffer, CodeBuffer* orig_buffer,
           Metadata* m;
           if (r->metadata_is_immediate()) {
             assert(reloc_data[j] == (uint)j, "should be");
-            methodHandle comp_method(THREAD, target()->get_Method());
+            methodHandle comp_method(THREAD, target->get_Method());
             m = read_metadata(comp_method);
-            if (failed() || lookup_failed()) {
+            if (lookup_failed()) {
               success = false;
               break;
             }
@@ -819,7 +806,7 @@ bool SCAFile::read_relocations(CodeBuffer* buffer, CodeBuffer* orig_buffer,
         case relocInfo::virtual_call_type:   // Fall through. They all call resolve_*_call blobs.
         case relocInfo::opt_virtual_call_type:
         case relocInfo::static_call_type: {
-          address dest = _table->address_for_id(reloc_data[j]);
+          address dest = _archive->address_for_id(reloc_data[j]);
           if (dest != (address)-1) {
             ((CallRelocation*)iter.reloc())->set_destination(dest);
           }
@@ -829,7 +816,7 @@ bool SCAFile::read_relocations(CodeBuffer* buffer, CodeBuffer* orig_buffer,
           iter.reloc()->fix_relocation_after_move(orig_buffer, buffer);
           break;
         case relocInfo::runtime_call_type: {
-          address dest = _table->address_for_id(reloc_data[j]);
+          address dest = _archive->address_for_id(reloc_data[j]);
           if (dest != (address)-1) {
             ((CallRelocation*)iter.reloc())->set_destination(dest);
           }
@@ -841,7 +828,7 @@ bool SCAFile::read_relocations(CodeBuffer* buffer, CodeBuffer* orig_buffer,
           break;
         case relocInfo::external_word_type: {
           iter.reloc()->fix_relocation_after_move(orig_buffer, buffer);
-          address target = _table->address_for_id(reloc_data[j]);
+          address target = _archive->address_for_id(reloc_data[j]);
           int data_len = iter.datalen();
           if (data_len > 0) {
             // Overwrite RelocInfo embedded address
@@ -878,7 +865,7 @@ bool SCAFile::read_relocations(CodeBuffer* buffer, CodeBuffer* orig_buffer,
           break;
       }
 #ifdef ASSERT
-      if (UseNewCode3) {
+      if (UseNewCode) {
         iter.print_current();
       }
 #endif
@@ -886,11 +873,10 @@ bool SCAFile::read_relocations(CodeBuffer* buffer, CodeBuffer* orig_buffer,
     }
     assert(j <= (int)reloc_count, "sanity");
   }
-  FREE_C_HEAP_ARRAY(uint, reloc_data);
   return success;
 }
 
-bool SCAFile::read_code(CodeBuffer* buffer, CodeBuffer* orig_buffer, uint offset) {
+bool SCAReader::read_code(CodeBuffer* buffer, CodeBuffer* orig_buffer, uint offset) {
   assert(offset == align_up(offset, DATA_ALIGNMENT), "%d not aligned to %d", offset, DATA_ALIGNMENT);
   assert(buffer->blob() != nullptr, "sanity");
   SCACodeSection* sca_cs = (SCACodeSection*)addr(offset);
@@ -898,6 +884,9 @@ bool SCAFile::read_code(CodeBuffer* buffer, CodeBuffer* orig_buffer, uint offset
     CodeSection* cs = buffer->code_section(i);
     // Read original section size and address.
     uint orig_size = sca_cs[i]._size;
+    if (UseNewCode) {
+      tty->print_cr("======== read code section %d [%d]:", i, orig_size);
+    }
     uint orig_size_align = align_up(orig_size, DATA_ALIGNMENT);
     if (i != (int)CodeBuffer::SECT_INSTS) {
       buffer->initialize_section_size(cs, orig_size_align);
@@ -942,34 +931,25 @@ if (UseNewCode2) {
   if (entry == nullptr) {
     return false;
   }
-  uint entry_position = entry->offset();
-  if (!archive->seek_to_position(entry_position)) {
-    return false;
-  }
+  SCAReader reader(archive, entry);
+  return reader.compile_blob(buffer, pc_offset);
+}
+
+bool SCAReader::compile_blob(CodeBuffer* buffer, int* pc_offset) {
+  uint entry_position = _entry->offset();
 
   // Read pc_offset
-  uint n = archive->read_bytes(pc_offset, sizeof(int));
-  if (n != sizeof(int)) {
-    return false;
-  }
+  *pc_offset = *(int*)addr(entry_position);
 
   // Read name
-  uint name_offset = entry_position + entry->name_offset();
-  if (!archive->seek_to_position(name_offset)) {
-    return false;
-  }
-  uint name_size   = entry->name_size(); // Includes '/0'
-  char*  name        = NEW_C_HEAP_ARRAY(char, name_size, mtCode);
-  n = archive->read_bytes(name, name_size);
-  if (n != name_size) {
-    FREE_C_HEAP_ARRAY(char, name);
-    return false;
-  }
-  log_info(sca, stubs)("Reading blob '%s' from shared code archive '%s'", name, archive->_archive_path);
+  uint name_offset = entry_position + _entry->name_offset();
+  uint name_size = _entry->name_size(); // Includes '/0'
+  const char* name = addr(name_offset);
+
+  log_info(sca, stubs)("Reading blob '%s' with pc_offset %d from shared code archive '%s'", name, *pc_offset, _archive->archive_path());
 
   if (strncmp(buffer->name(), name, (name_size - 1)) != 0) {
     log_warning(sca)("Saved stub's name '%s' is different from '%s'", name, buffer->name());
-    archive->set_failed();
     return false;
   }
 
@@ -977,20 +957,18 @@ if (UseNewCode2) {
   CodeBuffer orig_buffer(name);
 
   // Read code
-  if (!archive->read_code(buffer, &orig_buffer, entry->code_offset())) {
+  if (!read_code(buffer, &orig_buffer, _entry->code_offset())) {
     return false;
   }
 
   // Read relocations
-  uint reloc_offset = entry_position + entry->reloc_offset();
-  if (!archive->seek_to_position(reloc_offset)) {
-    return false;
-  }
-  if (!archive->read_relocations(buffer, &orig_buffer, entry->reloc_size(), nullptr)) {
+  uint reloc_offset = entry_position + _entry->reloc_offset();
+  set_read_position(reloc_offset);
+  if (!read_relocations(buffer, &orig_buffer, _entry->reloc_size(), nullptr, nullptr)) {
     return false;
   }
 
-  log_info(sca, stubs)("Read blob '%s' from shared code archive '%s'", name, archive->_archive_path);
+  log_info(sca, stubs)("Read blob '%s' from shared code archive '%s'", name, _archive->archive_path());
 #ifdef ASSERT
 if (UseNewCode2) {
   FlagSetting fs(PrintRelocations, true);
@@ -998,7 +976,6 @@ if (UseNewCode2) {
   buffer->decode();
 }
 #endif
-  FREE_C_HEAP_ARRAY(char, name);
   return true;
 }
 
@@ -1261,35 +1238,38 @@ if (UseNewCode2) {
   return true;
 }
 
-DebugInformationRecorder* SCAFile::read_debug_info(OopRecorder* oop_recorder) {
-  int data_size = 0;
-  uint n = read_bytes(&data_size, sizeof(int));
-  if (n != sizeof(int)) {
-    return nullptr;
-  }
-  int pcs_length = 0;
-  n = read_bytes(&pcs_length, sizeof(int));
-  if (n != sizeof(int)) {
-    return nullptr;
-  }
+DebugInformationRecorder* SCAReader::read_debug_info(OopRecorder* oop_recorder) {
+  uint code_offset = align_up(read_position(), DATA_ALIGNMENT);
+  int data_size  = *(int*)addr(code_offset);
+  code_offset   += sizeof(int);
+  int pcs_length = *(int*)addr(code_offset);
+  code_offset   += sizeof(int);
 
-  DebugInformationRecorder* recorder = new DebugInformationRecorder(oop_recorder, data_size, pcs_length);
+if (UseNewCode) {
+  tty->print_cr("======== read DebugInfo [%d, %d]:", data_size, pcs_length);
+}
 
-  n = read_bytes(recorder->stream()->buffer(), data_size);
-  if (n != (uint)data_size) {
-    return nullptr;
-  }
+  // Aligned initial sizes
+  int data_size_align  = align_up(data_size, DATA_ALIGNMENT);
+  int pcs_length_align = pcs_length + 1;
+  assert(sizeof(PcDesc) > DATA_ALIGNMENT, "sanity");
+  DebugInformationRecorder* recorder = new DebugInformationRecorder(oop_recorder, data_size_align, pcs_length);
+
+  copy_bytes(addr(code_offset), recorder->stream()->buffer(), data_size_align);
   recorder->stream()->set_position(data_size);
+  code_offset += data_size;
 
   uint pcs_size = pcs_length * sizeof(PcDesc);
-  n = read_bytes(recorder->pcs(), pcs_size);
-  if (n != pcs_size) {
-    return nullptr;
-  }
+  copy_bytes(addr(code_offset), (address)recorder->pcs(), pcs_size);
+  code_offset += pcs_size;
+  set_read_position(code_offset);
   return recorder;
 }
 
 bool SCAFile::write_debug_info(DebugInformationRecorder* recorder) {
+  if (!align_write()) {
+    return false;
+  }
   int data_size = recorder->data_size(); // In bytes
   uint n = write_bytes(&data_size, sizeof(int));
   if (n != sizeof(int)) {
@@ -1312,35 +1292,36 @@ bool SCAFile::write_debug_info(DebugInformationRecorder* recorder) {
   return true;
 }
 
-OopMapSet* SCAFile::read_oop_maps() {
-  uint om_count = 0;
-  uint n = read_bytes(&om_count, sizeof(int));
-  if (n != sizeof(int)) {
-    return nullptr;
-  }
+OopMapSet* SCAReader::read_oop_maps() {
+  uint code_offset = read_position();
+  int om_count = *(int*)addr(code_offset);
+  code_offset += sizeof(int);
+
+if (UseNewCode) {
+  tty->print_cr("======== read oop maps [%d]:", om_count);
+} 
+
   OopMapSet* oop_maps = new OopMapSet(om_count);
   for (int i = 0; i < (int)om_count; i++) {
-    int data_size = 0;
-    n = read_bytes(&data_size, sizeof(int));
-    if (n != sizeof(int)) {
-      return nullptr;
-    }
+    int data_size = *(int*)addr(code_offset);
+    code_offset += sizeof(int);
+
     OopMap* oop_map = new OopMap(data_size);
     // Preserve allocated stream
     CompressedWriteStream* stream = oop_map->write_stream();
+
     // Read data which overwrites default data
-    n = read_bytes(oop_map, sizeof(OopMap));
-    if (n != sizeof(OopMap)) {
-      return nullptr;
-    }
+    copy_bytes(addr(code_offset), (address)oop_map, sizeof(OopMap));
+    code_offset += sizeof(OopMap);
     stream->set_position(data_size);
     oop_map->set_write_stream(stream);
-    n = read_bytes(oop_map->data(), (uint)data_size);
-    if (n != (uint)data_size) {
-      return nullptr;
+    if (data_size > 0) {
+      copy_bytes(addr(code_offset), (address)(oop_map->data()), (uint)data_size);
+      code_offset += data_size;
     }
     oop_maps->add(oop_map);
   }
+  set_read_position(code_offset);
   return oop_maps;
 }
 
@@ -1369,13 +1350,12 @@ bool SCAFile::write_oop_maps(OopMapSet* oop_maps) {
   return true;
 }
 
-jobject SCAFile::read_oop(JavaThread* thread, const methodHandle& comp_method) {
+jobject SCAReader::read_oop(JavaThread* thread, const methodHandle& comp_method) {
+  uint code_offset = read_position();
   oop obj = nullptr;
-  DataKind kind;
-  uint n = read_bytes(&kind, sizeof(int));
-  if (n != sizeof(int)) {
-    return nullptr;
-  }
+  DataKind kind = *(DataKind*)addr(code_offset);
+  code_offset += sizeof(DataKind);
+  set_read_position(code_offset);
   if (kind == DataKind::Null) {
     return nullptr;
   } else if (kind == DataKind::No_Data) {
@@ -1387,27 +1367,19 @@ jobject SCAFile::read_oop(JavaThread* thread, const methodHandle& comp_method) {
     }
     obj = k->java_mirror();
   } else if (kind == DataKind::Primitive) {
-    int t = 0;
-    n = read_bytes(&t, sizeof(int));
-    if (n != sizeof(int)) {
-      return nullptr;
-    }
+    code_offset = read_position();
+    int t = *(int*)addr(code_offset);
+    code_offset += sizeof(int);
+    set_read_position(code_offset);
     BasicType bt = (BasicType)t;
     obj = java_lang_Class::primitive_mirror(bt);
     log_info(sca)("Read primitive type klass: %s", type2name(bt));
   } else if (kind == DataKind::String) {
-    int length = 0;
-    n = read_bytes(&length, sizeof(int));
-    if (n != sizeof(int)) {
-      return nullptr;
-    }
-    int total_length = length + 1;
-    char* dest = NEW_RESOURCE_ARRAY(char, total_length);
-    n = read_bytes(dest, length);
-    if (n != (uint)length) {
-      return nullptr;
-    }
-    dest[length] = '\0';
+    code_offset = read_position(); 
+    int length = *(int*)addr(code_offset);
+    code_offset += sizeof(int);
+    set_read_position(code_offset);
+    const char* dest = addr(code_offset);
     obj = StringTable::intern(&(dest[0]), thread);
     if (obj == nullptr) {
       set_lookup_failed();
@@ -1430,13 +1402,12 @@ jobject SCAFile::read_oop(JavaThread* thread, const methodHandle& comp_method) {
   return JNIHandles::make_local(thread, obj);
 }
 
-bool SCAFile::read_oops(OopRecorder* oop_recorder, ciMethod* target) {
-  int oop_count = 0;
-  uint n = read_bytes(&oop_count, sizeof(int));
-  if (n != sizeof(int)) {
-    return false;
-  }
-if (UseNewCode3) {
+bool SCAReader::read_oops(OopRecorder* oop_recorder, ciMethod* target) {
+  uint code_offset = read_position();
+  int oop_count = *(int*)addr(code_offset);
+  code_offset += sizeof(int);
+  set_read_position(code_offset);
+if (UseNewCode) {
   tty->print_cr("======== read oops [%d]:", oop_count);
 }
   if (oop_count == 0) {
@@ -1447,11 +1418,11 @@ if (UseNewCode3) {
     methodHandle comp_method(THREAD, target->get_Method());
     for (int i = 0; i < oop_count; i++) {
       jobject jo = read_oop(THREAD, comp_method);
-      if (failed() || lookup_failed()) {
+      if (lookup_failed()) {
         return false;
       }
       oop_recorder->find_index(jo);
-if (UseNewCode3) {
+if (UseNewCode) {
       tty->print("%d: " INTPTR_FORMAT " ", i, p2i(jo));
       if (jo == (jobject)Universe::non_oop_word()) {
         tty->print("non-oop word");
@@ -1467,13 +1438,12 @@ if (UseNewCode3) {
   return true;
 }
 
-Metadata* SCAFile::read_metadata(const methodHandle& comp_method) {
+Metadata* SCAReader::read_metadata(const methodHandle& comp_method) {
+  uint code_offset = read_position();
   Metadata* m = nullptr;
-  DataKind kind;
-  uint n = read_bytes(&kind, sizeof(int));
-  if (n != sizeof(int)) {
-    return nullptr;
-  }
+  DataKind kind = *(DataKind*)addr(code_offset);
+  code_offset += sizeof(DataKind);
+  set_read_position(code_offset);
   if (kind == DataKind::Null) {
     m = (Metadata*)nullptr;
   } else if (kind == DataKind::No_Data) {
@@ -1489,13 +1459,12 @@ Metadata* SCAFile::read_metadata(const methodHandle& comp_method) {
   return m;
 }
 
-bool SCAFile::read_metadata(OopRecorder* oop_recorder, ciMethod* target) {
-  int metadata_count = 0;
-  uint n = read_bytes(&metadata_count, sizeof(int));
-  if (n != sizeof(int)) {
-    return false;
-  }
-if (UseNewCode3) {
+bool SCAReader::read_metadata(OopRecorder* oop_recorder, ciMethod* target) {
+  uint code_offset = read_position();
+  int metadata_count = *(int*)addr(code_offset);
+  code_offset += sizeof(int);
+  set_read_position(code_offset);
+if (UseNewCode) {
   tty->print_cr("======== read metadata [%d]:", metadata_count);
 }
   if (metadata_count == 0) {
@@ -1507,11 +1476,11 @@ if (UseNewCode3) {
 
     for (int i = 0; i < metadata_count; i++) {
       Metadata* m = read_metadata(comp_method);
-      if (failed() || lookup_failed()) {
+      if (lookup_failed()) {
         return false;
       }
       oop_recorder->find_index(m);
-if (UseNewCode3) {
+if (UseNewCode) {
      tty->print("%d: " INTPTR_FORMAT " ", i, p2i(m));
       if (m == (Metadata*)Universe::non_oop_word()) {
         tty->print("non-metadata word");
@@ -1568,8 +1537,10 @@ bool SCAFile::write_oop(jobject& jo) {
     if (n != sizeof(int)) {
       return false;
     }
+    ResourceMark rm;
     int length = 0;
     const char* string = java_lang_String::as_utf8_string(obj, length);
+    length++; // write tailing '/0'
     n = write_bytes(&length, sizeof(int));
     if (n != sizeof(int)) {
       return false;
@@ -1693,6 +1664,22 @@ if (UseNewCode3) {
   return true;
 }
 
+bool SCAReader::read_dependencies(Dependencies* dependencies) {
+  uint code_offset = read_position();
+  int dependencies_size = *(int*)addr(code_offset);
+if (UseNewCode) {
+  tty->print_cr("======== read dependencies [%d]:", dependencies_size);
+}
+  code_offset += sizeof(int);
+  code_offset = align_up(code_offset, DATA_ALIGNMENT);
+  if (dependencies_size > 0) {
+    dependencies->set_content((u_char*)addr(code_offset), dependencies_size);
+  }
+  code_offset += dependencies_size;
+  set_read_position(code_offset);
+  return true;
+}
+
 bool SCAFile::load_nmethod(ciEnv* env, ciMethod* target, int entry_bci, AbstractCompiler* compiler) {
   if (entry_bci != InvocationEntryBci) {
     return false; // No OSR
@@ -1704,7 +1691,7 @@ bool SCAFile::load_nmethod(ciEnv* env, ciMethod* target, int entry_bci, Abstract
   if (archive == nullptr) {
     return false;
   }
-  archive->set_target(target);
+  ReadingMark rdmk;
 
   const char* target_name = nullptr;
   uint decomp = (target->method_data() == nullptr) ? 0 : target->method_data()->decompile_count();
@@ -1715,179 +1702,148 @@ bool SCAFile::load_nmethod(ciEnv* env, ciMethod* target, int entry_bci, Abstract
     target_name = os::strdup(method->name_and_sig_as_C_string());
   }
   uint hash = java_lang_String::hash_code((const jbyte*)target_name, strlen(target_name));
-
-log_info(sca, nmethod)("Reading nmethod '%s' (decomp: %d) from shared code archive '%s'", target_name, decomp, archive->_archive_path);
+  log_info(sca, nmethod)("Reading nmethod '%s' (decomp: %d) from shared code archive '%s'", target_name, decomp, archive->_archive_path);
 
   SCAEntry* entry = archive->find_entry(SCAEntry::Code, hash, decomp);
   if (entry == nullptr) {
     return false;
   }
 
-if (UseNewCode3) tty->print_cr("=== load_nmethod: 1");
+  SCAReader reader(archive, entry);
+  return reader.compile(env, target, entry_bci, compiler, target_name);
+}
 
-  uint entry_position = entry->offset();
-  if (!archive->seek_to_position(entry_position)) {
-    return false;
-  }
+SCAReader::SCAReader(SCAFile* archive, SCAEntry* entry) {
+  _archive = archive;
+  _entry   = entry;
+  _archive_buffer = archive->archive_buffer();
+  _read_position = 0;
+  _lookup_failed = false;
+}
+
+bool SCAReader::compile(ciEnv* env, ciMethod* target, int entry_bci, AbstractCompiler* compiler, const char* target_name) {
+if (UseNewCode) tty->print_cr("=== load_nmethod: 1");
+
+  uint entry_position = _entry->offset();
+  set_read_position(entry_position);
 
   // Read name
-  uint name_offset = entry_position + entry->name_offset();
-  if (!archive->seek_to_position(name_offset)) {
-    return false;
-  }
-  uint name_size   = entry->name_size(); // Includes '/0'
-  char*  name      = NEW_C_HEAP_ARRAY(char, name_size, mtCode);
-  uint n = archive->read_bytes(name, name_size);
-  if (n != name_size) {
-    FREE_C_HEAP_ARRAY(char, name);
-    return false;
-  }
+  uint name_offset = entry_position + _entry->name_offset();
+  uint name_size = _entry->name_size(); // Includes '/0'
+  const char* name     = addr(name_offset);
+
   if (strncmp(target_name, name, (name_size - 1)) != 0) {
     log_warning(sca)("Saved nmethod's name '%s' is different from '%s'", name, target_name);
-    archive->set_lookup_failed();
+    set_lookup_failed();
     return false;
   }
   os::free((void*)target_name);
 
-  uint code_offset = entry_position + entry->code_offset();
-  if (!archive->seek_to_position(code_offset)) {
-    return false;
-  }
+  uint code_offset = entry_position + _entry->code_offset();
+  set_read_position(code_offset);
 
-if (UseNewCode3) tty->print_cr("=== load_nmethod: 2");
+if (UseNewCode) tty->print_cr("=== load_nmethod: 2");
 
   // Read flags
-  int flags = 0;
-  n = archive->read_bytes(&flags, sizeof(int));
-  if (n != sizeof(int)) {
-    return false;
-  }
+  int flags = *(int*)addr(code_offset);
+  code_offset += sizeof(int);
   bool has_monitors      = (flags & 0xFF) > 0;
   bool has_wide_vectors  = ((flags >>  8) & 0xFF) > 0;
   bool has_unsafe_access = ((flags >> 16) & 0xFF) > 0;
 
-  int orig_pc_offset = 0;
-  n = archive->read_bytes(&orig_pc_offset, sizeof(int));
-  if (n != sizeof(int)) {
-    return false;
-  }
-
-  int frame_size = 0;
-  n = archive->read_bytes(&frame_size, sizeof(int));
-  if (n != sizeof(int)) {
-    return false;
-  }
+  int orig_pc_offset = *(int*)addr(code_offset);
+  code_offset += sizeof(int);
+  int frame_size = *(int*)addr(code_offset);
+  code_offset += sizeof(int);
 
   // Read offsets
-  CodeOffsets offsets;
-  n = archive->read_bytes(&offsets, sizeof(CodeOffsets));
-  if (n != sizeof(CodeOffsets)) {
-    return false;
-  }
+  CodeOffsets* offsets = (CodeOffsets*)addr(code_offset);
+  code_offset += sizeof(CodeOffsets);
 
-if (UseNewCode3) tty->print_cr("=== load_nmethod: 3");
+if (UseNewCode) tty->print_cr("=== load_nmethod: 3; %d, %d, %d, %d", flags, orig_pc_offset, frame_size, code_offset);
 
   // Create Debug Information Recorder to record scopes, oopmaps, etc.
   OopRecorder* oop_recorder = new OopRecorder(env->arena());
   env->set_oop_recorder(oop_recorder);
 
+  set_read_position(code_offset);
+
   // Write OopRecorder data
-  if (!archive->read_oops(oop_recorder, target)) {
+  if (!read_oops(oop_recorder, target)) {
     return false;
   }
-  if (!archive->read_metadata(oop_recorder, target)) {
+  if (!read_metadata(oop_recorder, target)) {
     return false;
   }
 
   // Read Debug info
-  DebugInformationRecorder* recorder = archive->read_debug_info(oop_recorder);
+  DebugInformationRecorder* recorder = read_debug_info(oop_recorder);
   if (recorder == nullptr) {
     return false;
   }
   env->set_debug_info(recorder);
 
-if (UseNewCode3) tty->print_cr("=== load_nmethod: 4");
+if (UseNewCode) tty->print_cr("=== load_nmethod: 4");
 
   // Read Dependencies (compressed already)
   Dependencies* dependencies = new Dependencies(env);
-  int dependencies_size = 0;
-  n = archive->read_bytes(&dependencies_size, sizeof(int));
-  if (n != sizeof(int)) {
+  if (!read_dependencies(dependencies)) {
     return false;
-  }
-  if (dependencies_size > 0) {
-    u_char* dependencies_buffer = NEW_RESOURCE_ARRAY(u_char, dependencies_size);
-    n = archive->read_bytes(dependencies_buffer, dependencies_size);
-    if (n != (uint)dependencies_size) {
-      return false;
-    }
-    dependencies->set_content(dependencies_buffer, dependencies_size);
   }
   env->set_dependencies(dependencies);
 
   // Read oop maps
-  OopMapSet* oop_maps = archive->read_oop_maps();
+  OopMapSet* oop_maps = read_oop_maps();
   if (oop_maps == nullptr) {
     return false;
   }
 
   // Read exception handles
-  int exc_table_length = 0;
-  n = archive->read_bytes(&exc_table_length, sizeof(int));
-  if (n != sizeof(int)) {
-    return false;
-  }
+  code_offset = read_position();
+  int exc_table_length = *(int*)addr(code_offset);
+  code_offset += sizeof(int);
   ExceptionHandlerTable handler_table(MAX2(exc_table_length, 4));
   if (exc_table_length > 0) {
     handler_table.set_length(exc_table_length);
     uint exc_table_size = handler_table.size_in_bytes();
-    n = archive->read_bytes(handler_table.table(), exc_table_size);
-    if (n != exc_table_size) {
-      return false;
-    }
+    copy_bytes(addr(code_offset), (address)handler_table.table(), exc_table_size);
+    code_offset += exc_table_size;
   }
 
   // Read null check table
-  int nul_chk_length = 0;
-  n = archive->read_bytes(&nul_chk_length, sizeof(int));
-  if (n != sizeof(int)) {
-    return false;
-  }
+  int nul_chk_length = *(int*)addr(code_offset);
+  code_offset += sizeof(int);
   ImplicitExceptionTable nul_chk_table;
   if (nul_chk_length > 0) {
     nul_chk_table.set_size(nul_chk_length);
     nul_chk_table.set_len(nul_chk_length);
     uint nul_chk_size = nul_chk_table.size_in_bytes();
-    n = archive->read_bytes(nul_chk_table.data(), nul_chk_size);
-    if (n != nul_chk_size) {
-      return false;
-    }
+    copy_bytes(addr(code_offset), (address)nul_chk_table.data(), nul_chk_size);
+    code_offset += nul_chk_size;
   }
 
-if (UseNewCode3) tty->print_cr("=== load_nmethod: 5");
+if (UseNewCode) tty->print_cr("=== load_nmethod: 5");
 
-  uint reloc_max_size = entry->reloc_size();
-  CodeBuffer buffer("Compile::Fill_buffer", entry->code_size(), reloc_max_size);
+  uint reloc_max_size = _entry->reloc_size();
+  CodeBuffer buffer("Compile::Fill_buffer", _entry->code_size(), reloc_max_size);
   buffer.initialize_oop_recorder(oop_recorder);
 
   // Create fake original CodeBuffer
   CodeBuffer orig_buffer(name);
 
   // Read code
-  if (!archive->read_code(&buffer, &orig_buffer, align_up(archive->_file_offset, DATA_ALIGNMENT))) {
+  if (!read_code(&buffer, &orig_buffer, align_up(code_offset, DATA_ALIGNMENT))) {
     return false;
   }
 
   // Read relocations
-  uint reloc_offset = entry_position + entry->reloc_offset();
-  if (!archive->seek_to_position(reloc_offset)) {
-    return false;
-  }
-  if (!archive->read_relocations(&buffer, &orig_buffer, reloc_max_size, oop_recorder)) {
+  uint reloc_offset = entry_position + _entry->reloc_offset();
+  set_read_position(reloc_offset);
+  if (!read_relocations(&buffer, &orig_buffer, reloc_max_size, oop_recorder, target)) {
     return false;
   }
 
-  log_info(sca, nmethod)("Read nmethod '%s' (decomp: %d) from shared code archive '%s'", name, decomp, archive->_archive_path);
+  log_info(sca, nmethod)("Read nmethod '%s' from shared code archive '%s'", name, _archive->archive_path());
 #ifdef ASSERT
 if (UseNewCode3) {
   FlagSetting fs(PrintRelocations, true);
@@ -1895,13 +1851,13 @@ if (UseNewCode3) {
   buffer.decode();
 }
 #endif
-  FREE_C_HEAP_ARRAY(char, name);
 
-  if (VerifySharedCode) return false;
-
+  if (VerifySharedCode) {
+    return false;
+  }
   // Register nmethod
   env->register_method(target, entry_bci,
-                       &offsets, orig_pc_offset,
+                       offsets, orig_pc_offset,
                        &buffer, frame_size,
                        oop_maps, &handler_table,
                        &nul_chk_table, compiler,
@@ -1909,7 +1865,7 @@ if (UseNewCode3) {
                        has_wide_vectors,
                        has_monitors,
                        0, NoRTM,
-                       entry);
+                       (SCAEntry *)_entry);
   return true;
 }
 
@@ -2022,11 +1978,13 @@ if (UseNewCode3) {
   if (!archive->write_debug_info(recorder)) {
     return false;
   }
-
   // Write Dependencies
   int dependencies_size = (int)dependencies->size_in_bytes();
   n = archive->write_bytes(&dependencies_size, sizeof(int));
   if (n != sizeof(int)) {
+    return false;
+  }
+  if (!archive->align_write()) {
     return false;
   }
   n = archive->write_bytes(dependencies->content_bytes(), dependencies_size);
@@ -2105,7 +2063,7 @@ if (UseNewCode3) {
     assert(type##_length < type##_max, "increase size"); \
   }
 
-void SCATable::init() {
+void SCAddressTable::init() {
   assert(!_complete, "init only once");
   _extrs_addr = NEW_C_HEAP_ARRAY(address, _extrs_max, mtCode);
   _stubs_addr = NEW_C_HEAP_ARRAY(address, _stubs_max, mtCode);
@@ -2308,7 +2266,7 @@ void SCATable::init() {
   _complete = true;
 }
 
-void SCATable::init_opto() {
+void SCAddressTable::init_opto() {
 #ifdef COMPILER2
   // OptoRuntime Blobs
   SET_ADDRESS(_blobs, OptoRuntime::exception_blob()->entry_point());
@@ -2336,7 +2294,7 @@ void SCATable::init_opto() {
 #undef _stubs_max
 #undef _blobs_max
 
-SCATable::~SCATable() {
+SCAddressTable::~SCAddressTable() {
   if (_extrs_addr != nullptr) {
     FREE_C_HEAP_ARRAY(address, _extrs_addr);
   }
@@ -2363,10 +2321,10 @@ bool SCAFile::load_strings() {
   uint* sizes = (uint*)addr(strings_offset);
   strings_size -= sizes_size;
   _C_strings_buf = addr(strings_offset + sizes_size);
-  char* p = _C_strings_buf;
+  const char* p = _C_strings_buf;
   assert(strings_count <= MAX_STR_COUNT, "sanity");
   for (uint i = 0; i < strings_count; i++) {
-    _C_strings[i] = (const char*)p;
+    _C_strings[i] = p;
     p += sizes[i];
   }
   assert((uint)(p - _C_strings_buf) <= strings_size, "sanity");
@@ -2401,7 +2359,7 @@ void SCAFile::add_C_string(const char* str) {
   _table->add_C_string(str);
 }
 
-void SCATable::add_C_string(const char* str) {
+void SCAddressTable::add_C_string(const char* str) {
   if (str != nullptr && _complete && _opto_complete) {
     // Check previous strings address
     for (int i = 0; i < _C_strings_count; i++) {
@@ -2419,7 +2377,7 @@ if (UseNewCode3) tty->print_cr("add_C_string: [%d] " INTPTR_FORMAT " %s", _C_str
   }
 }
 
-int SCATable::id_for_C_string(address str) {
+int SCAddressTable::id_for_C_string(address str) {
   for (int i = 0; i < _C_strings_count; i++) {
     if (_C_strings[i] == (const char*)str) {
       return i; // Found existing one
@@ -2428,7 +2386,7 @@ int SCATable::id_for_C_string(address str) {
   return -1;
 }
 
-address SCATable::address_for_C_string(int idx) {
+address SCAddressTable::address_for_C_string(int idx) {
   assert(idx < _C_strings_count, "sanity");
   return (address)_C_strings[idx];
 }
@@ -2442,7 +2400,7 @@ int search_address(address addr, address* table, uint length) {
   return -1;
 }
 
-address SCATable::address_for_id(int idx) {
+address SCAddressTable::address_for_id(int idx) {
   if (!_complete) {
     fatal("SCA table is not complete");
   }
@@ -2473,7 +2431,7 @@ address SCATable::address_for_id(int idx) {
   return nullptr;
 }
 
-int SCATable::id_for_address(address addr) {
+int SCAddressTable::id_for_address(address addr) {
   int id = -1;
   if (addr == (address)-1) { // Static call stub has jump to itself
     return id;

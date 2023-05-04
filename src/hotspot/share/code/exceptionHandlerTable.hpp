@@ -85,6 +85,8 @@ class HandlerTableEntry {
 class nmethod;
 class ExceptionHandlerTable {
   friend class SCAFile;
+  friend class SCAReader;
+
  private:
   HandlerTableEntry* _table;    // the table
   int                _length;   // the current length of the table
@@ -146,6 +148,7 @@ typedef  uint              implicit_null_entry;
 
 class ImplicitExceptionTable {
   friend class SCAFile;
+  friend class SCAReader;
  private:
   uint _size;
   uint _len;

@@ -149,7 +149,7 @@ public:
 };
 
 // Addresses of stubs, blobs and runtime finctions called from compiled code.
-class SCATable : public CHeapObj<mtCode> {
+class SCAddressTable : public CHeapObj<mtCode> {
 private:
   address* _extrs_addr;
   address* _stubs_addr;
@@ -162,8 +162,8 @@ private:
   bool _opto_complete;
 
 public:
-  SCATable() { _complete = false; _opto_complete = false; }
-  ~SCATable();
+  SCAddressTable() { _complete = false; _opto_complete = false; }
+  ~SCAddressTable();
   void init();
   void init_opto();
   void add_C_string(const char* str);
@@ -180,71 +180,106 @@ public:
   uint _offset;
 };
 
+enum class DataKind: int {
+  No_Data   = -1,
+  Null      = 0,
+  Klass     = 1,
+  Method    = 2,
+  String    = 3,
+  Primitive = 4, // primitive Class object
+  SysLoader = 5, // java_system_loader
+  PlaLoader = 6  // java_platform_loader
+};
+
+class SCAFile;
+
+class SCAReader { // Concurent per compilation request
+private:
+  const SCAFile*  _archive;
+  const SCAEntry* _entry;
+  const char* _archive_buffer; // Loaded Archive
+  uint  _read_position;        // Position in _archive_buffer
+  uint  read_position() const { return _read_position; }
+  void  set_read_position(uint pos);
+  const char* addr(uint offset) const { return _archive_buffer + offset; }
+
+  bool _lookup_failed;       // Failed to lookup for info (skip only this code load)
+  void set_lookup_failed()     { _lookup_failed = true; }
+  void clear_lookup_failed()   { _lookup_failed = false; }
+  bool lookup_failed()   const { return _lookup_failed; }
+
+public:
+  SCAReader(SCAFile* archive, SCAEntry* entry);
+
+  bool compile(ciEnv* env, ciMethod* target, int entry_bci, AbstractCompiler* compiler, const char* target_name);
+  bool compile_blob(CodeBuffer* buffer, int* pc_offset);
+
+  Klass* read_klass(const methodHandle& comp_method);
+  Method* read_method(const methodHandle& comp_method);
+
+  bool read_code(CodeBuffer* buffer, CodeBuffer* orig_buffer, uint offset);
+  bool read_relocations(CodeBuffer* buffer, CodeBuffer* orig_buffer, uint reloc_size, OopRecorder* oop_recorder, ciMethod* target);
+  DebugInformationRecorder* read_debug_info(OopRecorder* oop_recorder);
+  OopMapSet* read_oop_maps();
+  bool read_dependencies(Dependencies* dependencies);
+
+  jobject read_oop(JavaThread* thread, const methodHandle& comp_method);
+  Metadata* read_metadata(const methodHandle& comp_method);
+  bool read_oops(OopRecorder* oop_recorder, ciMethod* target);
+  bool read_metadata(OopRecorder* oop_recorder, ciMethod* target);
+};
+
 class SCAFile : public CHeapObj<mtCode> {
 private:
   SCAHeader*  _header;
   const char* _archive_path;
-  uint        _file_size;    // Used when reading archive
+  char*       _archive_buffer; // Loaded Archive
+  uint        _file_size;      // Used when reading archive
   uint        _file_offset;
-  int  _fd;                  // _fd == -1 - file is closed
+  int  _fd;                    // _fd == -1 - file is closed
   bool _for_read;
-  bool _failed;              // Failed read/write to/from archive (archive is broken?)
-  bool _lookup_failed;       // Failed to lookup for info (skip only this code load)
+  bool _failed;                // Failed read/write to/from archive (archive is broken?)
 
-  SCATable* _table;
+  SCAddressTable* _table;
 
   SCAEntry* _entries;                      // Used when reading archive
   GrowableArray<SCAEntry>* _write_entries; // Used when writing archive
-
-  char* _C_strings_buf; // Loaded buffer for _C_strings[] table
-
-  char* _archive_buffer;   // Loaded Archive
-
-  ciMethod* _target; // Current compiled method
-
-  void set_target(ciMethod* target) { _target = target; }
-  ciMethod* target()          const { return _target; }   
+  const char* _C_strings_buf; // Loaded buffer for _C_strings[] table
 
   static SCAFile* open_for_read();
   static SCAFile* open_for_write();
 
   bool seek_to_position(uint pos);
   bool align_write();
-  uint read_bytes(void* buffer, uint nbytes);
   uint write_bytes(const void* buffer, uint nbytes);
+  const char* addr(uint offset) const { return _archive_buffer + offset; }
 
   void set_failed()   { _failed = true; }
 
+  bool _lookup_failed;       // Failed to lookup for info (skip only this code load)
   void set_lookup_failed()     { _lookup_failed = true; }
   void clear_lookup_failed()   { _lookup_failed = false; }
   bool lookup_failed()   const { return _lookup_failed; }
-
-  enum class DataKind: int {
-    No_Data   = -1,
-    Null      = 0,
-    Klass     = 1,
-    Method    = 2,
-    String    = 3,
-    Primitive = 4, // primitive Class object
-    SysLoader = 5, // java_system_loader
-    PlaLoader = 6  // java_platform_loader
-  };
 
 public:
   SCAFile(const char* archive_path, int fd, uint file_size, bool for_read);
   ~SCAFile();
 
+  const char* archive_buffer() const { return _archive_buffer; }
+  const char* archive_path()   const { return _archive_path; }
   bool failed() const { return _failed; }
 
-  char* addr(uint offset) const { return _archive_buffer + offset; }
+  uint file_size() const { return _file_size; }
+  uint file_offset() const { return _file_offset; }
 
   bool load_strings();
   int store_strings();
 
   static void init_table();
   static void init_opto_table();
-  int fd() const { return _fd; }
+  address address_for_id(int id) const { return _table->address_for_id(id); } 
 
+  int fd() const { return _fd; }
   bool for_read() const;
   bool for_write() const;
 
@@ -259,19 +294,12 @@ public:
   static bool load_stub(StubCodeGenerator* cgen, vmIntrinsicID id, const char* name, address start);
   static bool store_stub(StubCodeGenerator* cgen, vmIntrinsicID id, const char* name, address start);
 
-  Klass* read_klass(const methodHandle& comp_method);
-  Method* read_method(const methodHandle& comp_method);
-
   bool write_klass(Klass* klass);
   bool write_method(Method* method);
 
-  bool read_code(CodeBuffer* buffer, CodeBuffer* orig_buffer, uint offset);
-  bool read_relocations(CodeBuffer* buffer, CodeBuffer* orig_buffer, uint reloc_size, OopRecorder* oop_recorder);
   bool write_code(CodeBuffer* buffer, uint& code_size);
   bool write_relocations(CodeBuffer* buffer, uint& reloc_size);
-  DebugInformationRecorder* read_debug_info(OopRecorder* oop_recorder);
   bool write_debug_info(DebugInformationRecorder* recorder);
-  OopMapSet* read_oop_maps();
   bool write_oop_maps(OopMapSet* oop_maps);
 
   jobject read_oop(JavaThread* thread, const methodHandle& comp_method);
