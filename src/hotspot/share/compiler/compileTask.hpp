@@ -83,6 +83,7 @@ class CompileTask : public CHeapObj<mtCompiler> {
   bool                 _is_complete;
   bool                 _is_success;
   bool                 _is_blocking;
+  bool                 _is_sca;
   CodeSection::csize_t _nm_content_size;
   CodeSection::csize_t _nm_total_size;
   CodeSection::csize_t _nm_insts_size;
@@ -127,6 +128,8 @@ class CompileTask : public CHeapObj<mtCompiler> {
   bool         is_complete() const               { return _is_complete; }
   bool         is_blocking() const               { return _is_blocking; }
   bool         is_success() const                { return _is_success; }
+  bool         is_sca() const                    { return _is_sca; }
+  void         set_sca()                         { _is_sca = true; }
   DirectiveSet* directive() const                { return _directive; }
   CodeSection::csize_t nm_content_size() { return _nm_content_size; }
   void         set_nm_content_size(CodeSection::csize_t size) { _nm_content_size = size; }

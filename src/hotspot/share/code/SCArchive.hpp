@@ -97,6 +97,7 @@ private:
   uint   _id;          // vmIntrinsic::ID for stub or name's hash for nmethod
   uint   _idx;         // Sequential index in archive (< SCAHeader::_entries_count)
   uint   _decompile;   // Decompile count for this nmethod
+  uint   _num_inlined_bytecodes;
   bool   _not_entrant; // Deoptimized
 
 public:
@@ -115,6 +116,7 @@ public:
     _id           = id;
     _idx          = idx;
     _decompile    = decomp;
+    _num_inlined_bytecodes = 0;
     _not_entrant  = false;
   }
 
@@ -130,6 +132,7 @@ public:
     _id           = 0;
     _idx          = 0;
     _decompile    = 0;
+    _num_inlined_bytecodes = 0;
     _not_entrant  = false;
   }
 
@@ -146,6 +149,8 @@ public:
   uint decompile()    const { return _decompile; }
   bool not_entrant()  const { return _not_entrant; }
   void set_not_entrant()    { _not_entrant = true; }
+  uint num_inlined_bytecodes() const { return _num_inlined_bytecodes; }
+  void set_inlined_bytecodes(int bytes) { _num_inlined_bytecodes = bytes; }
 };
 
 // Addresses of stubs, blobs and runtime finctions called from compiled code.
@@ -171,6 +176,7 @@ public:
   address address_for_C_string(int idx);
   int  id_for_address(address addr);
   address address_for_id(int id);
+  bool opto_complete() const { return _opto_complete; }
 };
 
 struct SCACodeSection {
@@ -285,7 +291,7 @@ public:
 
   void add_C_string(const char* str);
 
-  void add_entry(SCAEntry entry);
+  SCAEntry* add_entry(SCAEntry entry);
   SCAEntry* find_entry(SCAEntry::Kind kind, uint id, uint decomp = 0);
   void invalidate(SCAEntry* entry);
 
@@ -317,7 +323,7 @@ public:
 
   static bool load_nmethod(ciEnv* env, ciMethod* target, int entry_bci, AbstractCompiler* compiler);
 
-  static bool store_nmethod(const methodHandle& method,
+  static SCAEntry* store_nmethod(const methodHandle& method,
                      int compile_id,
                      int entry_bci,
                      CodeOffsets* offsets,
@@ -347,6 +353,8 @@ public:
   static void initialize();
   static void close();
   static bool is_on() { return _archive != nullptr; }
+  static bool is_on_for_read()  { return _archive != nullptr && _archive->for_read(); }
+  static bool is_on_for_write() { return _archive != nullptr && _archive->for_write(); }
   static bool allow_const_field(ciConstant& value);
   static void invalidate(SCAEntry* entry);
   static void add_C_string(const char* str);

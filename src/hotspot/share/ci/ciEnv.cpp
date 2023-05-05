@@ -1131,8 +1131,8 @@ void ciEnv::register_method(ciMethod* target,
     assert(offsets->value(CodeOffsets::Deopt) != -1, "must have deopt entry");
     assert(offsets->value(CodeOffsets::Exceptions) != -1, "must have exception entry");
 
-    if (rtm_state == NoRTM) {
-      SCAFile::store_nmethod(method,
+    if (rtm_state == NoRTM && SCArchive::is_on_for_write()) {
+      sca_entry = SCAFile::store_nmethod(method,
                              compile_id(),
                              entry_bci,
                              offsets,
@@ -1144,6 +1144,9 @@ void ciEnv::register_method(ciMethod* target,
                              has_unsafe_access,
                              has_wide_vectors,
                              has_monitors);
+      if (sca_entry != nullptr) {
+        sca_entry->set_inlined_bytecodes(num_inlined_bytecodes());
+      }
     }
     nm =  nmethod::new_nmethod(method,
                                compile_id(),

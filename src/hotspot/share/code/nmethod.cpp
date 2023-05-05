@@ -1531,6 +1531,9 @@ void nmethod::post_compiled_method(CompileTask* task) {
   task->set_nm_content_size(content_size());
   task->set_nm_insts_size(insts_size());
   task->set_nm_total_size(total_size());
+  if (_sca_entry != nullptr && LoadSharedCode) {
+    task->set_sca();
+  }
 
   // JVMTI -- compiled method notification (must be done outside lock)
   post_compiled_method_load_event();

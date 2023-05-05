@@ -109,6 +109,7 @@ void CompileTask::initialize(int compile_id,
 
   _is_complete = false;
   _is_success = false;
+  _is_sca = false;
 
   _hot_method = nullptr;
   _hot_method_holder = nullptr;

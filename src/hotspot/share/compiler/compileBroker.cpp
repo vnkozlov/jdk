@@ -30,6 +30,7 @@
 #include "code/codeCache.hpp"
 #include "code/codeHeapState.hpp"
 #include "code/dependencyContext.hpp"
+#include "code/SCArchive.hpp"
 #include "compiler/compilationLog.hpp"
 #include "compiler/compilationPolicy.hpp"
 #include "compiler/compileBroker.hpp"
@@ -190,6 +191,7 @@ int CompileBroker::_sum_nmethod_code_size          = 0;
 jlong CompileBroker::_peak_compilation_time        = 0;
 
 CompilerStatistics CompileBroker::_stats_per_level[CompLevel_full_optimization];
+CompilerStatistics CompileBroker::_sca_stats;
 
 CompileQueue* CompileBroker::_c2_compile_queue     = nullptr;
 CompileQueue* CompileBroker::_c1_compile_queue     = nullptr;
@@ -2511,7 +2513,11 @@ void CompileBroker::collect_statistics(CompilerThread* thread, elapsedTimer time
       }
 
       // Collect statistic per compilation level
-      if (comp_level > CompLevel_none && comp_level <= CompLevel_full_optimization) {
+      if (task->is_sca()) {
+        _sca_stats._standard.update(time, bytes_compiled);
+        _sca_stats._nmethods_size += task->nm_total_size();
+        _sca_stats._nmethods_code_size += task->nm_insts_size();
+      } else if (comp_level > CompLevel_none && comp_level <= CompLevel_full_optimization) {
         CompilerStatistics* stats = &_stats_per_level[comp_level-1];
         if (is_osr) {
           stats->_osr.update(time, bytes_compiled);
@@ -2526,7 +2532,7 @@ void CompileBroker::collect_statistics(CompilerThread* thread, elapsedTimer time
 
       // Collect statistic per compiler
       AbstractCompiler* comp = compiler(comp_level);
-      if (comp) {
+      if (comp && !task->is_sca()) {
         CompilerStatistics* stats = comp->stats();
         if (is_osr) {
           stats->_osr.update(time, bytes_compiled);
@@ -2535,7 +2541,7 @@ void CompileBroker::collect_statistics(CompilerThread* thread, elapsedTimer time
         }
         stats->_nmethods_size += task->nm_total_size();
         stats->_nmethods_code_size += task->nm_insts_size();
-      } else { // if (!comp)
+      } else if (!task->is_sca()) { // if (!comp)
         assert(false, "Compiler object must exist");
       }
     }
@@ -2619,6 +2625,9 @@ void CompileBroker::print_times(bool per_compiler, bool aggregate) {
       if (comp != nullptr) {
         print_times(comp->name(), comp->stats());
       }
+    }
+    if (_sca_stats._standard._count > 0) {
+      print_times("SC", &_sca_stats);
     }
     if (aggregate) {
       tty->cr();
