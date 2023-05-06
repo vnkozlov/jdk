@@ -102,8 +102,6 @@ void CompileTask::initialize(int compile_id,
   _method_holder = JNIHandles::make_weak_global(Handle(thread, method->method_holder()->klass_holder()));
   _osr_bci = osr_bci;
   _is_blocking = is_blocking;
-  JVMCI_ONLY(_has_waiter = CompileBroker::compiler(comp_level)->is_jvmci();)
-  JVMCI_ONLY(_blocking_jvmci_compile_state = nullptr;)
   _comp_level = comp_level;
   _num_inlined_bytecodes = 0;
 
@@ -118,12 +116,25 @@ void CompileTask::initialize(int compile_id,
   _time_started = 0;
   _compile_reason = compile_reason;
   _nm_content_size = 0;
-  AbstractCompiler* comp = compiler();
-  _directive = DirectivesStack::getMatchingDirective(method, comp);
   _nm_insts_size = 0;
   _nm_total_size = 0;
   _failure_reason = nullptr;
   _failure_reason_on_C_heap = false;
+
+  AbstractCompiler* comp = CompileBroker::compiler(comp_level);
+#if INCLUDE_JVMCI
+  if (comp->is_jvmci() && CompileBroker::compiler3() != nullptr) {
+    assert(_method != nullptr, "sanity");
+    if (((JVMCICompiler*)comp)->force_comp_at_level_simple(method)) {
+      comp = CompileBroker::compiler3();
+    }
+  }
+#endif
+  _compiler = comp;
+  _directive = DirectivesStack::getMatchingDirective(method, comp);
+
+  JVMCI_ONLY(_has_waiter = comp->is_jvmci();)
+  JVMCI_ONLY(_blocking_jvmci_compile_state = nullptr;)
 
   if (LogCompilation) {
     if (hot_method.not_null()) {
@@ -144,7 +155,8 @@ void CompileTask::initialize(int compile_id,
  * Returns the compiler for this task.
  */
 AbstractCompiler* CompileTask::compiler() {
-  return CompileBroker::compiler(_comp_level);
+  assert(_compiler != nullptr, "should be set");
+  return _compiler;
 }
 
 // Replace weak handles by strong handles to avoid unloading during compilation.
@@ -203,7 +215,7 @@ void CompileTask::metadata_do(MetadataClosure* f) {
 //
 void CompileTask::print_line_on_error(outputStream* st, char* buf, int buflen) {
   // print compiler name
-  st->print("%s:", CompileBroker::compiler_name(comp_level()));
+  st->print("%s:", compiler()->name());
   print(st);
 }
 
@@ -213,7 +225,7 @@ void CompileTask::print_tty() {
   ttyLocker ttyl;  // keep the following output all in one block
   // print compiler name if requested
   if (CIPrintCompilerName) {
-    tty->print("%s:", CompileBroker::compiler_name(comp_level()));
+    tty->print("%s:", compiler()->name());
   }
   print(tty);
 }
@@ -222,6 +234,7 @@ void CompileTask::print_tty() {
 // CompileTask::print_impl
 void CompileTask::print_impl(outputStream* st, Method* method, int compile_id, int comp_level,
                              bool is_osr_method, int osr_bci, bool is_blocking,
+                             const char* compiler_name,
                              const char* msg, bool short_form, bool cr,
                              jlong time_queued, jlong time_started) {
   if (!short_form) {
@@ -238,7 +251,7 @@ void CompileTask::print_impl(outputStream* st, Method* method, int compile_id, i
   }
   // print compiler name if requested
   if (CIPrintCompilerName) {
-    st->print("%s:", CompileBroker::compiler_name(comp_level));
+    st->print("%s:", compiler_name);
   }
   st->print("%4d ", compile_id);    // print compilation number
 
@@ -306,7 +319,8 @@ void CompileTask::print_inline_indent(int inline_level, outputStream* st) {
 // CompileTask::print_compilation
 void CompileTask::print(outputStream* st, const char* msg, bool short_form, bool cr) {
   bool is_osr_method = osr_bci() != InvocationEntryBci;
-  print_impl(st, is_unloaded() ? nullptr : method(), compile_id(), comp_level(), is_osr_method, osr_bci(), is_blocking(), msg, short_form, cr, _time_queued, _time_started);
+  print_impl(st, is_unloaded() ? nullptr : method(), compile_id(), comp_level(), is_osr_method, osr_bci(), is_blocking(),
+             compiler()->name(), msg, short_form, cr, _time_queued, _time_started);
 }
 
 // ------------------------------------------------------------------
@@ -470,6 +484,7 @@ void CompileTask::print_ul(const nmethod* nm, const char* msg) {
                nm->comp_level(), nm->is_osr_method(),
                nm->is_osr_method() ? nm->osr_entry_bci() : -1,
                /*is_blocking*/ false,
+               nm->compiler_name(),
                msg, /* short form */ true, /* cr */ true);
   }
 }

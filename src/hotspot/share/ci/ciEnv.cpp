@@ -1060,6 +1060,7 @@ void ciEnv::register_method(ciMethod* target,
       // All buffers in the CodeBuffer are allocated in the CodeCache.
       // If the code buffer is created on each compile attempt
       // as in C2, then it must be freed.
+      // But keep shared code.
       code_buffer->free_blob();
       return;
     }
@@ -1075,6 +1076,12 @@ void ciEnv::register_method(ciMethod* target,
     // No safepoints are allowed. Otherwise, class redefinition can occur in between.
     MutexLocker ml(Compile_lock);
     NoSafepointVerifier nsv;
+
+    if (sca_entry != nullptr && sca_entry->not_entrant()) {
+      // This shared code was marked invalid while it was loaded
+      code_buffer->free_blob();
+      return;
+    }
 
     // Change in Jvmti state may invalidate compilation.
     if (!failing() && jvmti_state_changed()) {

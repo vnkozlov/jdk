@@ -126,18 +126,21 @@ volatile int  CompileBroker::_print_compilation_warning = 0;
 volatile jint CompileBroker::_should_compile_new_jobs = run_compilation;
 
 // The installed compiler(s)
-AbstractCompiler* CompileBroker::_compilers[2];
+AbstractCompiler* CompileBroker::_compilers[3];
 
 // The maximum numbers of compiler threads to be determined during startup.
 int CompileBroker::_c1_count = 0;
 int CompileBroker::_c2_count = 0;
+int CompileBroker::_c3_count = 0;
 
 // An array of compiler names as Java String objects
 jobject* CompileBroker::_compiler1_objects = nullptr;
 jobject* CompileBroker::_compiler2_objects = nullptr;
+jobject* CompileBroker::_compiler3_objects = nullptr;
 
 CompileLog** CompileBroker::_compiler1_logs = nullptr;
 CompileLog** CompileBroker::_compiler2_logs = nullptr;
+CompileLog** CompileBroker::_compiler3_logs = nullptr;
 
 // These counters are used to assign an unique ID to each compilation.
 volatile jint CompileBroker::_compilation_id     = 0;
@@ -193,6 +196,7 @@ jlong CompileBroker::_peak_compilation_time        = 0;
 CompilerStatistics CompileBroker::_stats_per_level[CompLevel_full_optimization];
 CompilerStatistics CompileBroker::_sca_stats;
 
+CompileQueue* CompileBroker::_c3_compile_queue     = nullptr;
 CompileQueue* CompileBroker::_c2_compile_queue     = nullptr;
 CompileQueue* CompileBroker::_c1_compile_queue     = nullptr;
 
@@ -225,6 +229,7 @@ CompileTaskWrapper::~CompileTaskWrapper() {
   CompilerThread* thread = CompilerThread::current();
   CompileTask* task = thread->task();
   CompileLog*  log  = thread->log();
+  AbstractCompiler* comp = thread->compiler();
   if (log != nullptr && !task->is_unloaded())  task->log_task_done(log);
   thread->set_task(nullptr);
   thread->set_env(nullptr);
@@ -234,7 +239,7 @@ CompileTaskWrapper::~CompileTaskWrapper() {
       MutexLocker notifier(thread, task->lock());
       task->mark_complete();
 #if INCLUDE_JVMCI
-      if (CompileBroker::compiler(task->comp_level())->is_jvmci()) {
+      if (comp->is_jvmci()) {
         if (!task->has_waiter()) {
           // The waiting thread timed out and thus did not free the task.
           free_task = true;
@@ -531,6 +536,9 @@ void CompileBroker::print_compile_queues(outputStream* st) {
   if (_c2_compile_queue != nullptr) {
     _c2_compile_queue->print(st);
   }
+  if (_c3_compile_queue != nullptr) {
+    _c3_compile_queue->print(st);
+  }
 }
 
 void CompileQueue::print(outputStream* st) {
@@ -601,6 +609,7 @@ void CompileBroker::compilation_init_phase1(JavaThread* THREAD) {
   // Set the interface to the current compiler(s).
   _c1_count = CompilationPolicy::c1_count();
   _c2_count = CompilationPolicy::c2_count();
+  _c3_count = CompilationPolicy::c3_count();
 
 #if INCLUDE_JVMCI
   if (EnableJVMCI) {
@@ -623,6 +632,11 @@ void CompileBroker::compilation_init_phase1(JavaThread* THREAD) {
         _c1_count = JVMCIHostThreads;
 #endif // COMPILER1
       }
+#ifdef COMPILER2
+      if (SCArchive::is_on() && (_c3_count > 0)) {
+        _compilers[2] = new C2Compiler();
+      }
+#endif
     }
   }
 #endif // INCLUDE_JVMCI
@@ -940,7 +954,12 @@ void CompileBroker::init_compiler_threads() {
     _compiler1_objects = NEW_C_HEAP_ARRAY(jobject, _c1_count, mtCompiler);
     _compiler1_logs = NEW_C_HEAP_ARRAY(CompileLog*, _c1_count, mtCompiler);
   }
-
+  if (_c3_count > 0) {
+    const char* name = "C2 compile queue";
+    _c3_compile_queue  = new CompileQueue(name);
+    _compiler3_objects = NEW_C_HEAP_ARRAY(jobject, _c3_count, mtCompiler);
+    _compiler3_logs = NEW_C_HEAP_ARRAY(CompileLog*, _c3_count, mtCompiler);
+  }
   char name_buffer[256];
 
   for (int i = 0; i < _c2_count; i++) {
@@ -994,8 +1013,29 @@ void CompileBroker::init_compiler_threads() {
     }
   }
 
+  for (int i = 0; i < _c3_count; i++) {
+    // Create a name for our thread.
+    os::snprintf_checked(name_buffer, sizeof(name_buffer), "C2 CompilerThread%d", i);
+    Handle thread_oop = create_thread_oop(name_buffer, CHECK);
+    jobject thread_handle = JNIHandles::make_global(thread_oop); 
+    _compiler3_objects[i] = thread_handle;
+    _compiler3_logs[i] = nullptr;
+
+      JavaThread *ct = make_thread(compiler_t, thread_handle, _c3_compile_queue, _compilers[2], THREAD);
+      assert(ct != nullptr, "should have been handled for initial thread");
+      _compilers[2]->set_num_compiler_threads(i + 1);
+      if (trace_compiler_threads()) {
+        ResourceMark rm;
+        ThreadsListHandle tlh;  // name() depends on the TLH.
+        assert(tlh.includes(ct), "ct=" INTPTR_FORMAT " exited unexpectedly.", p2i(ct));
+        stringStream msg;
+        msg.print("Added initial compiler thread %s", ct->name());
+        print_compiler_threads(msg);
+      }
+  }
+
   if (UsePerfData) {
-    PerfDataManager::create_constant(SUN_CI, "threads", PerfData::U_Bytes, _c1_count + _c2_count, CHECK);
+    PerfDataManager::create_constant(SUN_CI, "threads", PerfData::U_Bytes, _c1_count + _c2_count + _c3_count, CHECK);
   }
 
 #if defined(ASSERT) && COMPILER2_OR_JVMCI
@@ -1114,6 +1154,9 @@ void CompileBroker::mark_on_stack() {
   assert(SafepointSynchronize::is_at_safepoint(), "sanity check");
   // Since we are at a safepoint, we do not need a lock to access
   // the compile queues.
+  if (_c3_compile_queue != nullptr) {
+    _c3_compile_queue->mark_on_stack();
+  }
   if (_c2_compile_queue != nullptr) {
     _c2_compile_queue->mark_on_stack();
   }
@@ -1194,8 +1237,16 @@ void CompileBroker::compile_method_base(const methodHandle& method,
   method->get_method_counters(thread);
 
   // Outputs from the following MutexLocker block:
-  CompileTask* task     = nullptr;
-  CompileQueue* queue  = compile_queue(comp_level);
+  CompileTask* task = nullptr;
+  CompileQueue* queue;
+#if INCLUDE_JVMCI
+  if (is_c2_compile(comp_level) && compiler2()->is_jvmci() && compiler3() != nullptr &&
+      ((JVMCICompiler*)compiler2())->force_comp_at_level_simple(method)) {
+    assert(_c3_compile_queue != nullptr, "sanity");
+    queue = _c3_compile_queue; // JVMCI compiler's methods compilation
+  } else
+#endif
+  queue = compile_queue(comp_level);
 
   // Acquire our lock.
   {
@@ -1616,6 +1667,7 @@ CompileTask* CompileBroker::create_compile_task(CompileQueue*       queue,
   new_task->initialize(compile_id, method, osr_bci, comp_level,
                        hot_method, hot_count, compile_reason,
                        blocking);
+  assert(queue != nullptr, "sanity");
   queue->add(new_task);
   return new_task;
 }
@@ -1805,6 +1857,10 @@ void CompileBroker::shutdown_compiler_runtime(AbstractCompiler* comp, CompilerTh
       _c2_compile_queue->free_all();
     }
 
+    if (_c3_compile_queue != nullptr) {
+      _c3_compile_queue->free_all();
+    }
+
     // Set flags so that we continue execution with using interpreter only.
     UseCompiler    = false;
     UseInterpreter = true;
@@ -1822,12 +1878,13 @@ CompileLog* CompileBroker::get_log(CompilerThread* ct) {
   if (!LogCompilation) return nullptr;
 
   AbstractCompiler *compiler = ct->compiler();
+  bool jvmci = JVMCI_ONLY( compiler->is_jvmci() ||) false;
   bool c1 = compiler->is_c1();
-  jobject* compiler_objects = c1 ? _compiler1_objects : _compiler2_objects;
+  jobject* compiler_objects = c1 ? _compiler1_objects : (_c3_count == 0 ? _compiler2_objects : (jvmci ? _compiler2_objects : _compiler3_objects));
   assert(compiler_objects != nullptr, "must be initialized at this point");
-  CompileLog** logs = c1 ? _compiler1_logs : _compiler2_logs;
+  CompileLog** logs = c1 ? _compiler1_logs : (_c3_count == 0 ? _compiler2_logs : (jvmci ? _compiler2_logs : _compiler3_logs));
   assert(logs != nullptr, "must be initialized at this point");
-  int count = c1 ? _c1_count : _c2_count;
+  int count = c1 ? _c1_count : (_c3_count == 0 ? _c2_count : (jvmci ? _c2_count : _c3_count));
 
   // Find Compiler number by its threadObj.
   oop compiler_obj = ct->threadObj();
@@ -2531,7 +2588,7 @@ void CompileBroker::collect_statistics(CompilerThread* thread, elapsedTimer time
       }
 
       // Collect statistic per compiler
-      AbstractCompiler* comp = compiler(comp_level);
+      AbstractCompiler* comp = task->compiler();
       if (comp && !task->is_sca()) {
         CompilerStatistics* stats = comp->stats();
         if (is_osr) {
@@ -2688,6 +2745,11 @@ void CompileBroker::print_times(bool per_compiler, bool aggregate) {
     comp->print_timers();
   }
   comp = compiler(CompLevel_full_optimization);
+  if (comp != nullptr) {
+    tty->cr();
+    comp->print_timers();
+  }
+  comp = _compilers[2];
   if (comp != nullptr) {
     tty->cr();
     comp->print_timers();

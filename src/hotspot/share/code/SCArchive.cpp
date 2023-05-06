@@ -95,6 +95,7 @@ void SCArchive::initialize() {
     }
     FLAG_SET_DEFAULT(FoldStableValues, false);
     FLAG_SET_DEFAULT(ForceUnreachable, true);
+    FLAG_SET_DEFAULT(DelayCompilerStubsGeneration, false);
   }
 }
 
@@ -1939,6 +1940,8 @@ if (UseNewCode3) {
   return true;
 }
 
+// No concurency for writing to archive file because this method is called from
+// ciEnv::register_method() under MethodCompileQueue_lock and Compile_lock locks.
 SCAEntry* SCAFile::store_nmethod(const methodHandle& method,
                      int compile_id,
                      int entry_bci,
@@ -1955,8 +1958,6 @@ SCAEntry* SCAFile::store_nmethod(const methodHandle& method,
                      bool has_unsafe_access,
                      bool has_wide_vectors,
                      bool has_monitors) {
-// No concurency for writing to archive file because this method is called from
-// ciEnv::register_method() under MethodCompileQueue_lock and Compile_lock locks.
   if (entry_bci != InvocationEntryBci) {
     return nullptr; // No OSR
   }
@@ -2396,16 +2397,20 @@ bool SCAFile::load_strings() {
     _C_strings[i] = p;
     p += sizes[i];
   }
-  assert((uint)(p - _C_strings_buf) <= strings_size, "sanity");
+  assert((uint)(p - _C_strings_buf) <= strings_size, "(" INTPTR_FORMAT " - " INTPTR_FORMAT ") = %d > %d ", p2i(p), p2i(_C_strings_buf), (uint)(p - _C_strings_buf), strings_size);
   _C_strings_count = strings_count;
   return true;
 }
 
 int SCAFile::store_strings() {
+  uint offset = _file_offset;
+  uint length = 0;
   if (_C_strings_count > 0) {
     // Write sizes first
     for (int i = 0; i < _C_strings_count; i++) {
       uint len = (uint)strlen(_C_strings[i]) + 1; // Include 0
+      length += len;
+      assert(len < 1000, "big string: %s", _C_strings[i]);
       uint n = write_bytes(&len, sizeof(uint));
       if (n != sizeof(uint)) {
         return -1;
@@ -2418,7 +2423,7 @@ int SCAFile::store_strings() {
         return -1;
       }
     }
-    log_info(sca)("Wrote %d C strings to shared code archive '%s'", _C_strings_count, _archive_path);
+    log_info(sca)("Wrote %d C strings of total length %d at offset %d to shared code archive '%s'", _C_strings_count, length, offset, _archive_path);
   }
   return _C_strings_count;
 }

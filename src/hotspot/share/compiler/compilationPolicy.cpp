@@ -24,6 +24,7 @@
 
 #include "precompiled.hpp"
 #include "code/scopeDesc.hpp"
+#include "code/SCArchive.hpp"
 #include "compiler/compilationPolicy.hpp"
 #include "compiler/compileBroker.hpp"
 #include "compiler/compilerDefinitions.inline.hpp"
@@ -54,6 +55,7 @@
 jlong CompilationPolicy::_start_time = 0;
 int CompilationPolicy::_c1_count = 0;
 int CompilationPolicy::_c2_count = 0;
+int CompilationPolicy::_c3_count = 0;
 double CompilationPolicy::_increase_threshold_at_ratio = 0;
 
 void compilationPolicy_init() {
@@ -203,7 +205,7 @@ bool CompilationPolicy::force_comp_at_level_simple(const methodHandle& method) {
     if (UseJVMCICompiler) {
       AbstractCompiler* comp = CompileBroker::compiler(CompLevel_full_optimization);
       if (comp != nullptr && comp->is_jvmci() && ((JVMCICompiler*) comp)->force_comp_at_level_simple(method)) {
-        return true;
+        return !SCArchive::is_on();
       }
     }
 #endif
@@ -488,6 +490,10 @@ void CompilationPolicy::initialize() {
         int c1_count = MAX2(count - libjvmci_count, 1);
         set_c2_count(libjvmci_count);
         set_c1_count(c1_count);
+      } else if (UseJVMCICompiler && (StoreSharedCode || LoadSharedCode)) {
+        set_c1_count(MAX2(count / 3, 1));
+        set_c2_count(MAX2(count - c1_count(), 1));
+        set_c3_count(1);
       } else
 #endif
       {
