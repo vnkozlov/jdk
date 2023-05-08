@@ -189,6 +189,7 @@ SCAFile::SCAFile(const char* archive_path, int fd, uint file_size, bool for_read
   _file_offset = 0;
   _fd = fd;
   _for_read = for_read;
+  _closing  = false;
   _failed = false;
   _lookup_failed = false;
   _table = nullptr;
@@ -264,26 +265,27 @@ SCAFile::~SCAFile() {
   if (_fd < 0) {
     return; // Already closed
   }
-  if (open_for_write()) { // Finalize archive
-    finish_write();
-  }
-  int fd = _fd;
-  _fd = -1; // This will stop any access to archive because it is checked
-            // on entry to load_nmethod() and store_nmethod();
-if (UseNewCode) tty->print_cr("closing archive: 0");
+  // Stop any further access to archive.
+  // Checked on entry to load_nmethod() and store_nmethod().
+  _closing = true;
   if (_for_read && _reading_nmethod > 0) {
     // Wait for all load_nmethod() finish.
+    // TODO: may be have new separate locker for SCA.
     MonitorLocker locker(Compilation_lock, Mutex::_no_safepoint_check_flag);
     while (_reading_nmethod > 0) {
       locker.wait(10); // Wait 10 ms
     }
   }
-if (UseNewCode) tty->print_cr("closing archive: 1");
   // Prevent writing code into archive while we are closing it.
+  // This lock held by ciEnv::register_method() which calls store_nmethod().
   MutexLocker ml(Compile_lock);
-  if (::close(fd) < 0) {
-    log_warning(sca)("Failed to close shared code archive file '%s'", _archive_path);
+  if (for_write()) { // Finalize archive
+    finish_write();
   } 
+  if (::close(_fd) < 0) { 
+    log_warning(sca)("Failed to close shared code archive file '%s'", _archive_path);
+  }
+  _fd = -1;
 
   log_info(sca)("Closed shared code archive '%s'", _archive_path);
   FREE_C_HEAP_ARRAY(char, _archive_path);
@@ -319,7 +321,7 @@ bool SCAFile::for_write() const { return (_fd >= 0) && !_for_read && !_failed; }
 
 SCAFile* SCAFile::open_for_read() {
   SCAFile* archive = SCArchive::archive();
-  if (archive != nullptr && archive->for_read()) {
+  if (archive != nullptr && archive->for_read() && !archive->closing()) {
     return archive;
   }
   return nullptr;
@@ -327,7 +329,7 @@ SCAFile* SCAFile::open_for_read() {
 
 SCAFile* SCAFile::open_for_write() {
   SCAFile* archive = SCArchive::archive();
-  if (archive != nullptr && archive->for_write()) {
+  if (archive != nullptr && archive->for_write() && !archive->closing()) {
     archive->clear_lookup_failed(); // Reset bit
     return archive;
   }
@@ -561,7 +563,8 @@ bool SCAFile::store_stub(StubCodeGenerator* cgen, vmIntrinsicID id, const char* 
   if (n != name_size) {
     return false;
   }
-  SCAEntry entry(entry_position, name_offset, name_size, code_offset, code_size, 0, 0,
+  uint entry_size = entry_position - archive->_file_offset;
+  SCAEntry entry(entry_position, entry_size, name_offset, name_size, code_offset, code_size, 0, 0,
                  SCAEntry::Stub, (uint32_t)id, archive->_header->next_idx());
   archive->add_entry(entry);
   log_info(sca, stubs)("Wrote stub '%s' id:%d to shared code archive '%s'", name, (int)id, archive->_archive_path);
@@ -1294,7 +1297,8 @@ if (UseNewCode3) {
     return false;
   }
 
-  SCAEntry entry(entry_position, name_offset, name_size,
+  uint entry_size = entry_position - archive->_file_offset;
+  SCAEntry entry(entry_position, entry_size, name_offset, name_size,
                  code_offset, code_size, reloc_offset, reloc_size,
                  SCAEntry::Blob, (uint32_t)999, archive->_header->next_idx());
   archive->add_entry(entry);
@@ -2111,7 +2115,8 @@ if (UseNewCode3) {
     return nullptr;
   }
   uint decomp = (method->method_data() == nullptr) ? 0 : method->method_data()->decompile_count();
-  SCAEntry entry(entry_position, name_offset, name_size,
+  uint entry_size = entry_position - archive->_file_offset;
+  SCAEntry entry(entry_position, entry_size, name_offset, name_size,
                  code_offset, code_size, reloc_offset, reloc_size,
                  SCAEntry::Code, hash, archive->_header->next_idx(), decomp);
   {

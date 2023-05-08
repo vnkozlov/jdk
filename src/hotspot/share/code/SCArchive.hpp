@@ -86,71 +86,83 @@ public:
   };
 
 private:
-  uint   _offset; // Offset to entry
+  Kind   _kind;        //
+  uint   _id;          // vmIntrinsic::ID for stub or name's hash for nmethod
+  uint   _idx;         // Sequential index in archive (< SCAHeader::_entries_count)
+
+  uint   _offset;      // Offset to entry
+  uint   _size;        // Entry size
   uint   _name_offset; // Method's or intrinsic name
   uint   _name_size;
   uint   _code_offset; // Start of code in archive
   uint   _code_size;   // Total size of all code sections
   uint   _reloc_offset;// Relocations
   uint   _reloc_size;  // Max size of relocations per code section
-  Kind   _kind;        // 1:stub, 2:blob, 3:nmethod
-  uint   _id;          // vmIntrinsic::ID for stub or name's hash for nmethod
-  uint   _idx;         // Sequential index in archive (< SCAHeader::_entries_count)
-  uint   _decompile;   // Decompile count for this nmethod
   uint   _num_inlined_bytecodes;
+
+  uint   _decompile;   // Decompile count for this nmethod
   bool   _not_entrant; // Deoptimized
 
 public:
-  SCAEntry(uint offset, uint name_offset, uint name_size,
+  SCAEntry(uint offset, uint size, uint name_offset, uint name_size,
            uint code_offset, uint code_size,
            uint reloc_offset, uint reloc_size,
            Kind kind, uint id, uint idx, uint decomp = 0) {
+    _kind         = kind;
+    _id           = id;
+    _idx          = idx;
+
     _offset       = offset;
+    _size         = size;
     _name_offset  = name_offset;
     _name_size    = name_size;
     _code_offset  = code_offset;
     _code_size    = code_size;
     _reloc_offset = reloc_offset;
     _reloc_size   = reloc_size;
-    _kind         = kind;
-    _id           = id;
-    _idx          = idx;
-    _decompile    = decomp;
     _num_inlined_bytecodes = 0;
+
+    _decompile    = decomp;
     _not_entrant  = false;
   }
 
   SCAEntry() {
-    _offset = 0;
+    _kind         = None;
+    _id           = 0;
+    _idx          = 0;
+
+    _offset       = 0;
+    _size         = 0;
     _name_offset  = 0;
     _name_size    = 0;
     _code_offset  = 0;
     _code_size    = 0;
     _reloc_offset = 0;
     _reloc_size   = 0;
-    _kind         = None;
-    _id           = 0;
-    _idx          = 0;
-    _decompile    = 0;
     _num_inlined_bytecodes = 0;
+
+    _decompile    = 0;
     _not_entrant  = false;
   }
 
+  Kind kind()         const { return _kind; }
+  uint id()           const { return _id; }
+  uint idx()          const { return _idx; }
+
   uint offset()       const { return _offset; }
+  uint size()         const { return _size; }
   uint name_offset()  const { return _name_offset; }
   uint name_size()    const { return _name_size; }
   uint code_offset()  const { return _code_offset; }
   uint code_size()    const { return _code_size; }
   uint reloc_offset() const { return _reloc_offset; }
   uint reloc_size()   const { return _reloc_size; }
-  Kind kind()         const { return _kind; }
-  uint id()           const { return _id; }
-  uint idx()          const { return _idx; }
+  uint num_inlined_bytecodes() const { return _num_inlined_bytecodes; }
+  void set_inlined_bytecodes(int bytes) { _num_inlined_bytecodes = bytes; }
+
   uint decompile()    const { return _decompile; }
   bool not_entrant()  const { return _not_entrant; }
   void set_not_entrant()    { _not_entrant = true; }
-  uint num_inlined_bytecodes() const { return _num_inlined_bytecodes; }
-  void set_inlined_bytecodes(int bytes) { _num_inlined_bytecodes = bytes; }
 };
 
 // Addresses of stubs, blobs and runtime finctions called from compiled code.
@@ -243,7 +255,8 @@ private:
   uint        _file_size;      // Used when reading archive
   uint        _file_offset;
   int  _fd;                    // _fd == -1 - file is closed
-  bool _for_read;
+  bool _for_read;              // Open for read
+  bool _closing;               // Closing archive
   bool _failed;                // Failed read/write to/from archive (archive is broken?)
 
   SCAddressTable* _table;
@@ -288,6 +301,7 @@ public:
   int fd() const { return _fd; }
   bool for_read() const;
   bool for_write() const;
+  bool closing() const { return _closing; }
 
   void add_C_string(const char* str);
 

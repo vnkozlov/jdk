@@ -447,7 +447,7 @@ void before_exit(JavaThread* thread, bool halt) {
   assert(!thread->has_pending_exception(), "must be");
 #endif
 
-  SCArchive::close();
+  SCArchive::close(); // Write final data and close archive
 
   // Actual shutdown logic begins here.
 
