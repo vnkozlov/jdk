@@ -388,6 +388,9 @@
   product(ccstr, SharedCodeArchive, "code.jsa",                             \
           "File with compiled code")                                        \
                                                                             \
+  product(uint, ReservedSharedCodeSize, 10*M,                               \
+          "Buffer size in bytes for storing shared code")                   \
+                                                                            \
   product(bool, VerifySharedCode, false, DIAGNOSTIC,                        \
           "Load compiled code but not publish")                             \
 

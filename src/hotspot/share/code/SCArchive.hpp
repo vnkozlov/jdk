@@ -215,11 +215,11 @@ class SCAReader { // Concurent per compilation request
 private:
   const SCAFile*  _archive;
   const SCAEntry* _entry;
-  const char* _archive_buffer; // Loaded Archive
-  uint  _read_position;        // Position in _archive_buffer
+  const char* _load_buffer; // Loaded Archive
+  uint  _read_position;        // Position in _load_buffer
   uint  read_position() const { return _read_position; }
   void  set_read_position(uint pos);
-  const char* addr(uint offset) const { return _archive_buffer + offset; }
+  const char* addr(uint offset) const { return _load_buffer + offset; }
 
   bool _lookup_failed;       // Failed to lookup for info (skip only this code load)
   void set_lookup_failed()     { _lookup_failed = true; }
@@ -235,7 +235,7 @@ public:
   Klass* read_klass(const methodHandle& comp_method);
   Method* read_method(const methodHandle& comp_method);
 
-  bool read_code(CodeBuffer* buffer, CodeBuffer* orig_buffer, uint offset);
+  bool read_code(CodeBuffer* buffer, CodeBuffer* orig_buffer, uint code_offset);
   bool read_relocations(CodeBuffer* buffer, CodeBuffer* orig_buffer, uint reloc_size, OopRecorder* oop_recorder, ciMethod* target);
   DebugInformationRecorder* read_debug_info(OopRecorder* oop_recorder);
   OopMapSet* read_oop_maps();
@@ -251,11 +251,18 @@ class SCAFile : public CHeapObj<mtCode> {
 private:
   SCAHeader*  _header;
   const char* _archive_path;
-  char*       _archive_buffer; // Loaded Archive
-  uint        _file_size;      // Used when reading archive
-  uint        _file_offset;
+  char*       _load_buffer;    // Aligned buffer for loading Archive
+  char*       _store_buffer;   // Aligned buffer for storing Archive
+  char*       _C_load_buffer;  // Original unaligned buffer
+  char*       _C_store_buffer; // Original unaligned buffer
+
+  uint        _store_offset;   // Store archive aligned offset
+  uint        _write_position; // Position in _store_buffer
+  uint        _load_size;      // Used when reading archive
+  uint        _store_size;     // Used when writing archive
   int  _fd;                    // _fd == -1 - file is closed
   bool _for_read;              // Open for read
+  bool _for_write;             // Open for write
   bool _closing;               // Closing archive
   bool _failed;                // Failed read/write to/from archive (archive is broken?)
 
@@ -268,12 +275,10 @@ private:
   static SCAFile* open_for_read();
   static SCAFile* open_for_write();
 
-  bool seek_to_position(uint pos);
+  bool set_write_position(uint pos);
   bool align_write();
   uint write_bytes(const void* buffer, uint nbytes);
-  const char* addr(uint offset) const { return _archive_buffer + offset; }
-
-  void set_failed()   { _failed = true; }
+  const char* addr(uint offset) const { return _load_buffer + offset; }
 
   bool _lookup_failed;       // Failed to lookup for info (skip only this code load)
   void set_lookup_failed()     { _lookup_failed = true; }
@@ -281,15 +286,15 @@ private:
   bool lookup_failed()   const { return _lookup_failed; }
 
 public:
-  SCAFile(const char* archive_path, int fd, uint file_size, bool for_read);
+  SCAFile(const char* archive_path, int fd, uint load_size, bool for_read);
   ~SCAFile();
 
-  const char* archive_buffer() const { return _archive_buffer; }
+  const char* archive_buffer() const { return _load_buffer; }
   const char* archive_path()   const { return _archive_path; }
   bool failed() const { return _failed; }
 
-  uint file_size() const { return _file_size; }
-  uint file_offset() const { return _file_offset; }
+  uint load_size() const { return _load_size; }
+  uint write_position() const { return _write_position; }
 
   bool load_strings();
   int store_strings();
@@ -302,6 +307,8 @@ public:
   bool for_read() const;
   bool for_write() const;
   bool closing() const { return _closing; }
+
+  void set_failed()   { _failed = true; }
 
   void add_C_string(const char* str);
 
