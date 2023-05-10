@@ -1138,7 +1138,7 @@ void ciEnv::register_method(ciMethod* target,
     assert(offsets->value(CodeOffsets::Deopt) != -1, "must have deopt entry");
     assert(offsets->value(CodeOffsets::Exceptions) != -1, "must have exception entry");
 
-    if (rtm_state == NoRTM && SCArchive::is_on_for_write()) {
+    if (rtm_state == NoRTM && sca_entry == nullptr) {
       sca_entry = SCAFile::store_nmethod(method,
                              compile_id(),
                              entry_bci,

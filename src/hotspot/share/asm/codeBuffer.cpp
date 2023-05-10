@@ -515,9 +515,6 @@ static void append_oop_references(GrowableArray<oop>* oops, Klass* k) {
 }
 
 void CodeBuffer::finalize_oop_references(const methodHandle& mh) {
-  if (oop_recorder()->is_complete()) {
-    return; // Already done
-  }
   NoSafepointVerifier nsv;
 
   GrowableArray<oop> oops;

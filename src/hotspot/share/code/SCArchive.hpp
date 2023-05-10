@@ -68,7 +68,6 @@ public:
   uint version()        const { return _version; }
   uint strings_count()  const { return _strings_count; }
   uint entries_count()  const { return _entries_count; }
-  uint next_idx()             { return _entries_count++; }
 
   uint archive_size()   const { return _archive_size; }
   uint strings_offset() const { return _strings_offset; }
@@ -88,7 +87,6 @@ public:
 private:
   Kind   _kind;        //
   uint   _id;          // vmIntrinsic::ID for stub or name's hash for nmethod
-  uint   _idx;         // Sequential index in archive (< SCAHeader::_entries_count)
 
   uint   _offset;      // Offset to entry
   uint   _size;        // Entry size
@@ -107,10 +105,9 @@ public:
   SCAEntry(uint offset, uint size, uint name_offset, uint name_size,
            uint code_offset, uint code_size,
            uint reloc_offset, uint reloc_size,
-           Kind kind, uint id, uint idx, uint decomp = 0) {
+           Kind kind, uint id, uint decomp = 0) {
     _kind         = kind;
     _id           = id;
-    _idx          = idx;
 
     _offset       = offset;
     _size         = size;
@@ -129,7 +126,6 @@ public:
   SCAEntry() {
     _kind         = None;
     _id           = 0;
-    _idx          = 0;
 
     _offset       = 0;
     _size         = 0;
@@ -147,9 +143,10 @@ public:
 
   Kind kind()         const { return _kind; }
   uint id()           const { return _id; }
-  uint idx()          const { return _idx; }
 
   uint offset()       const { return _offset; }
+  void set_offset(uint off) { _offset = off; }
+
   uint size()         const { return _size; }
   uint name_offset()  const { return _name_offset; }
   uint name_size()    const { return _name_size; }
@@ -249,18 +246,16 @@ public:
 
 class SCAFile : public CHeapObj<mtCode> {
 private:
-  SCAHeader*  _header;
+  SCAHeader*  _load_header;
   const char* _archive_path;
   char*       _load_buffer;    // Aligned buffer for loading Archive
   char*       _store_buffer;   // Aligned buffer for storing Archive
   char*       _C_load_buffer;  // Original unaligned buffer
   char*       _C_store_buffer; // Original unaligned buffer
 
-  uint        _store_offset;   // Store archive aligned offset
   uint        _write_position; // Position in _store_buffer
   uint        _load_size;      // Used when reading archive
   uint        _store_size;     // Used when writing archive
-  int  _fd;                    // _fd == -1 - file is closed
   bool _for_read;              // Open for read
   bool _for_write;             // Open for write
   bool _closing;               // Closing archive
@@ -268,8 +263,8 @@ private:
 
   SCAddressTable* _table;
 
-  SCAEntry* _entries;                      // Used when reading archive
-  GrowableArray<SCAEntry>* _write_entries; // Used when writing archive
+  SCAEntry* _load_entries;                      // Used when reading archive
+  GrowableArray<SCAEntry>* _store_entries; // Used when writing archive
   const char* _C_strings_buf; // Loaded buffer for _C_strings[] table
 
   static SCAFile* open_for_read();
@@ -286,7 +281,7 @@ private:
   bool lookup_failed()   const { return _lookup_failed; }
 
 public:
-  SCAFile(const char* archive_path, int fd, uint load_size, bool for_read);
+  SCAFile(const char* archive_path, int fd, uint load_size);
   ~SCAFile();
 
   const char* archive_buffer() const { return _load_buffer; }
@@ -296,14 +291,13 @@ public:
   uint load_size() const { return _load_size; }
   uint write_position() const { return _write_position; }
 
-  bool load_strings();
+  void load_strings();
   int store_strings();
 
   static void init_table();
   static void init_opto_table();
   address address_for_id(int id) const { return _table->address_for_id(id); } 
 
-  int fd() const { return _fd; }
   bool for_read() const;
   bool for_write() const;
   bool closing() const { return _closing; }
@@ -366,8 +360,7 @@ class SCArchive {
 private:
   static SCAFile*  _archive;
 
-  static bool open_for_read(const char* archive_path);
-  static bool open_for_write(const char* archive_path);
+  static bool open_archive(const char* archive_path);
 
 public:
   static SCAFile* archive() { return _archive; }
@@ -378,6 +371,7 @@ public:
   static bool is_on_for_write() { return _archive != nullptr && _archive->for_write(); }
   static bool allow_const_field(ciConstant& value);
   static void invalidate(SCAEntry* entry);
+  static bool is_loaded(SCAEntry* entry);
   static void add_C_string(const char* str);
 };
 
