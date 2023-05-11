@@ -24,11 +24,6 @@
 
 #include "precompiled.hpp"
 #include "asm/macroAssembler.hpp"
-#include "compiler/abstractCompiler.hpp"
-#include "classfile/stringTable.hpp"
-#include "classfile/symbolTable.hpp"
-#include "classfile/systemDictionary.hpp"
-#include "classfile/vmIntrinsics.hpp"
 #include "ci/ciConstant.hpp"
 #include "ci/ciEnv.hpp"
 #include "ci/ciField.hpp"
@@ -36,10 +31,16 @@
 #include "ci/ciMethodData.hpp"
 #include "ci/ciObject.hpp"
 #include "ci/ciUtilities.inline.hpp"
+#include "classfile/stringTable.hpp"
+#include "classfile/symbolTable.hpp"
+#include "classfile/systemDictionary.hpp"
+#include "classfile/vmIntrinsics.hpp"
 #include "code/codeBlob.hpp"
 #include "code/codeCache.hpp"
 #include "code/oopRecorder.inline.hpp"
 #include "code/SCArchive.hpp"
+#include "compiler/abstractCompiler.hpp"
+#include "compiler/compileTask.hpp"
 #include "gc/g1/g1BarrierSetRuntime.hpp"
 #include "logging/log.hpp"
 #include "memory/universe.hpp"
@@ -110,7 +111,7 @@ void SCArchive::invalidate(SCAEntry* entry) {
 
 bool SCArchive::is_loaded(SCAEntry* entry) {
   if (_archive != nullptr && _archive->archive_buffer() != nullptr) {
-    return ((char*)entry - _archive->archive_buffer()) < _archive->load_size();
+    return (uint)((char*)entry - _archive->archive_buffer()) < _archive->load_size();
   }
   return false;
 }
@@ -390,6 +391,10 @@ uint SCAFile::write_bytes(const void* buffer, uint nbytes) {
   return nbytes;
 }
 
+void SCAEntry::print() const {
+  tty->print_cr("kind: %d, id: %d, offset: %d, size %d ", (int)_kind, _id, _offset, _size);
+}
+
 SCAEntry* SCAFile::add_entry(SCAEntry entry) {
   if (_store_entries == nullptr) {
     _store_entries = new(mtCode) GrowableArray<SCAEntry>(4, mtCode); // C heap
@@ -400,21 +405,68 @@ SCAEntry* SCAFile::add_entry(SCAEntry entry) {
   return _store_entries->adr_at(_store_entries->length() - 1); // Last
 }
 
+static bool check_entry(SCAEntry::Kind kind, uint id, uint decomp, SCAEntry* entry) {
+  if (entry->kind() == kind) {
+    assert(entry->id() == id, "sanity");
+    if (kind != SCAEntry::Code || (!entry->not_entrant() && entry->decompile() == decomp)) {
+      return true; // Found
+    }
+  }
+  return false;
+}
+
 SCAEntry* SCAFile::find_entry(SCAEntry::Kind kind, uint id, uint decomp) {
   assert(_for_read, "sanity");
   uint count = _load_header->entries_count();
   if (_load_entries == nullptr) {
     // Read it
-    _load_entries = (SCAEntry*)addr(_load_header->entries_offset());
-    log_info(sca)("Read %d SCAEntry entries at offset %d from shared code archive '%s'", count, _load_header->entries_offset(), _archive_path);
+    _search_entries = (uint*)addr(_load_header->entries_offset()); // [id, index]
+    _load_entries = (SCAEntry*)(_search_entries + 2 * count);
+    log_info(sca, init)("Read %d entries table at offset %d from shared code archive '%s'", count, _load_header->entries_offset(), _archive_path);
   }
-  for(uint i = 0; i < count; i++) {
-    SCAEntry* entry = &(_load_entries[i]);
-    if (entry->kind() == kind && entry->id() == id) {
-      if (kind == SCAEntry::Code && (entry->not_entrant()/* || entry->decompile() != decomp */)) {
-        continue;
+  // Binary search
+  int l = 0;
+  int h = count - 1;
+  while (l <= h) {
+    int mid = (l + h) >> 1;
+    int ix = mid * 2;
+    uint is = _search_entries[ix];
+    if (is == id) {
+      int index = _search_entries[ix + 1];
+      SCAEntry* entry = &(_load_entries[index]); 
+      if (check_entry(kind, id, decomp, entry)) {
+        return entry; // Found
       }
-      return entry;
+      // Leaner search around (could be the same nmethod with different decompile count)
+      for (int i = mid - 1; i >= l; i--) { // search back
+        ix = i * 2;
+        is = _search_entries[ix];
+        if (is != id) {
+          break;
+        }
+        index = _search_entries[ix + 1];
+        SCAEntry* entry = &(_load_entries[index]);
+        if (check_entry(kind, id, decomp, entry)) {
+          return entry; // Found
+        }
+      }
+      for (int i = mid + 1; i <= h; i++) { // search forward
+        ix = i * 2;
+        is = _search_entries[ix];
+        if (is != id) {
+          break;
+        }
+        index = _search_entries[ix + 1];
+        SCAEntry* entry = &(_load_entries[index]);
+        if (check_entry(kind, id, decomp, entry)) {
+          return entry; // Found
+        }
+      }
+      break; // Not found match (different decompile count or not_entrant state).
+    } else if (is < id) {
+      l = mid + 1;
+    } else {
+      h = mid - 1;
     }
   }
   return nullptr;
@@ -456,6 +508,14 @@ void SCAFile::invalidate(SCAEntry* entry) {
   entry->set_not_entrant();
 }
 
+extern "C" {
+  static int uint_cmp(const void *i, const void *j) {
+    uint a = *(uint *)i;
+    uint b = *(uint *)j;
+    return a > b ? 1 : a < b ? -1 : 0;
+  }
+}
+
 bool SCAFile::finish_write() {
   if (!align_write()) {
     return false;
@@ -471,28 +531,36 @@ bool SCAFile::finish_write() {
   uint strings_size = _write_position - strings_offset;
   uint header_size = sizeof(SCAHeader);
 
-  int entries_count = 0; // Number of entrant (useful) code entries
+  uint entries_count = 0; // Number of entrant (useful) code entries
   uint entries_offset = _write_position;
 
-  int store_count = _store_entries->length();
+  uint store_count = _store_entries->length();
   if (store_count > 0) {
-    int load_count = (_load_header != nullptr) ? _load_header->entries_count() : 0;
-    uint entries_size = (store_count + load_count) * sizeof(SCAEntry); // In bytes
-    uint total_size = _write_position + _load_size + align_up(entries_size, DATA_ALIGNMENT);
-    
+    uint load_count = (_load_header != nullptr) ? _load_header->entries_count() : 0;
+    uint code_count = store_count + load_count;
+    uint search_count = code_count * 2;
+    uint search_size = search_count * sizeof(uint);
+    uint entries_size = code_count * sizeof(SCAEntry); // In bytes
+    // _write_position should include headed, code and strings
+    uint code_alignment = code_count * DATA_ALIGNMENT; // We align_up code size when storing it.
+    uint total_size = _write_position + _load_size + code_alignment + search_size + align_up(entries_size, DATA_ALIGNMENT);
+
+    // Create ordered search table for entries [id, index];
+    uint* search = NEW_C_HEAP_ARRAY(uint, search_count, mtCode);
     char* buffer = NEW_C_HEAP_ARRAY(char, total_size + DATA_ALIGNMENT, mtCode);
     char* start = align_up(buffer, DATA_ALIGNMENT);
     char* current = start + align_up(header_size, DATA_ALIGNMENT); // Skip header
 
     SCAEntry* entries_address = _store_entries->adr_at(0);
-    int not_entrant_nb = 0;
+    uint not_entrant_nb = 0;
     uint max_size = 0;
-    for(int i = 0; i < store_count; i++) {
+    for(uint i = 0; i < store_count; i++) {
       if (entries_address[i].not_entrant()) {
-        log_info(sca, exit)("Not entrant new entry  id: %d, hash: " UINT32_FORMAT_X_0, i, entries_address[i].id());
+        log_info(sca, exit)("Not entrant new entry  id: %d, decomp: %d, hash: " UINT32_FORMAT_X_0, i, entries_address[i].decompile(), entries_address[i].id());
         not_entrant_nb++;
-      } else {
-        entries_count++;
+        entries_address[i].set_entrant(); // Reset
+      } //else
+      {
         uint size = align_up(entries_address[i].size(), DATA_ALIGNMENT);
         if (size > max_size) {
           max_size = size;
@@ -503,23 +571,29 @@ bool SCAFile::finish_write() {
         uint n = write_bytes(&(entries_address[i]), sizeof(SCAEntry));
         if (n != sizeof(SCAEntry)) {
           FREE_C_HEAP_ARRAY(char, buffer);
+          FREE_C_HEAP_ARRAY(uint, search);
           return false;
         }
+        search[entries_count*2 + 0] = entries_address[i].id();
+        search[entries_count*2 + 1] = entries_count;
+        entries_count++;
       }
     }
     if (entries_count == 0) {
       log_info(sca, exit)("No new entires, archive files %s was not %s", _archive_path, (_for_read ? "updated" : "created"));
       FREE_C_HEAP_ARRAY(char, buffer);
+      FREE_C_HEAP_ARRAY(uint, search);
       return true; // Nothing to write
     }
     // Add old entries
     if (_for_read && (_load_header != nullptr)) {
-      for(int i = 0; i < load_count; i++) {
+      for(uint i = 0; i < load_count; i++) {
         if (_load_entries[i].not_entrant()) {
-          log_info(sca, exit)("Not entrant load entry id: %d, hash: " UINT32_FORMAT_X_0, i, _load_entries[i].id());
+          log_info(sca, exit)("Not entrant load entry id: %d, decomp: %d, hash: " UINT32_FORMAT_X_0, i, _load_entries[i].decompile(), _load_entries[i].id());
           not_entrant_nb++;
-        } else {
-          entries_count++;
+          _load_entries[i].set_entrant(); // Reset
+        } //else
+        {
           uint size = align_up(_load_entries[i].size(), DATA_ALIGNMENT);
           if (size > max_size) {
             max_size = size;
@@ -530,28 +604,41 @@ bool SCAFile::finish_write() {
           uint n = write_bytes(&(_load_entries[i]), sizeof(SCAEntry));
           if (n != sizeof(SCAEntry)) {
             FREE_C_HEAP_ARRAY(char, buffer);
+            FREE_C_HEAP_ARRAY(uint, search);
             return false;
           }
+          search[entries_count*2 + 0] = _load_entries[i].id();
+          search[entries_count*2 + 1] = entries_count;
+          entries_count++;
         }
       }
     }
+    assert(entries_count <= (store_count + load_count), "%d > (%d + %d)", entries_count, store_count, load_count);
     // Write strings
     copy_bytes((_store_buffer + strings_offset), (address)current, strings_size);
     strings_offset = (current - start); // New offset
     current += strings_size;
 
+    uint new_entries_offset = (current - start); // New offset
+    // Sort and store search table
+    qsort(search, entries_count, 2*sizeof(uint), uint_cmp);
+    search_size = 2 * entries_count * sizeof(uint);
+    copy_bytes((const char*)search, (address)current, search_size);
+    FREE_C_HEAP_ARRAY(uint, search);
+    current += search_size;
+
     // Write entries
     entries_size = entries_count * sizeof(SCAEntry); // New size
     copy_bytes((_store_buffer + entries_offset), (address)current, entries_size);
-    entries_offset = (current - start); // New offset
     current += entries_size;
-    log_info(sca, exit)("Wrote %d SCAEntry entries (%d not entrant were excluded, %d max size) to shared code archive '%s'", entries_count, not_entrant_nb, max_size, _archive_path);
+    log_info(sca, exit)("Wrote %d SCAEntry entries (%d were not entrant, %d max size) to shared code archive '%s'", entries_count, not_entrant_nb, max_size, _archive_path);
 
     uint size = (current - start);
+    assert(size <= total_size, "%d > %d", size , total_size);
 
     // Finalize header
     SCAHeader* header = (SCAHeader*)start;
-    header->init(VM_Version::jvm_version(), entries_count, size, entries_offset, (uint)strings_count, strings_offset);
+    header->init(VM_Version::jvm_version(), size, (uint)strings_count, strings_offset, entries_count, new_entries_offset);
     log_info(sca, init)("Wrote header to shared code archive '%s'", _archive_path);
 
     // Now store to file
@@ -625,6 +712,26 @@ bool SCAFile::store_stub(StubCodeGenerator* cgen, vmIntrinsicID id, const char* 
   if (!archive->align_write()) {
     return false;
   }
+#ifdef ASSERT
+  CodeSection* cs = cgen->assembler()->code_section();
+  if (cs->has_locs()) {
+    uint reloc_count = cs->locs_count();
+    tty->print_cr("======== write stubs code section relocations [%d]:", reloc_count);
+    // Collect additional data
+    RelocIterator iter(cs);
+    while (iter.next()) {
+      switch (iter.type()) {
+        case relocInfo::none:
+          break;
+        default: {
+          iter.print_current();
+          fatal("stub's relocation %d unimplemented", (int)iter.type());
+          break;
+        }
+      }
+    }
+  }
+#endif
   uint entry_position = archive->_write_position;
 
   // Write code

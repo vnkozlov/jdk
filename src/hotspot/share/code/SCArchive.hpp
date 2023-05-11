@@ -49,28 +49,27 @@ class SCAHeader : public CHeapObj<mtCode> {
 private:
   // Here should be version and other verification fields
   uint _version;           // JDK version (should match when reading archive)
-  uint _strings_count;
-  uint _entries_count;     // number of recorded entries in archive
   uint _archive_size;      // archive size in bytes
+  uint _strings_count;
   uint _strings_offset;    // offset to recorded C strings
+  uint _entries_count;     // number of recorded entries in archive
   uint _entries_offset;    // offset of SCAEntry array describing entries
 
 public:
-  void init(uint version, int count, uint archive_size, uint entries_offset, uint strings_count, uint strings_offset) {
+  void init(uint version, uint archive_size, uint strings_count, uint strings_offset, uint entries_count, uint entries_offset) {
     _version        = version;
-    _strings_count  = strings_count;
-    _entries_count  = count;
     _archive_size   = archive_size;
+    _strings_count  = strings_count;
     _strings_offset = strings_offset;
+    _entries_count  = entries_count;
     _entries_offset = entries_offset;
   }
 
   uint version()        const { return _version; }
-  uint strings_count()  const { return _strings_count; }
-  uint entries_count()  const { return _entries_count; }
-
   uint archive_size()   const { return _archive_size; }
+  uint strings_count()  const { return _strings_count; }
   uint strings_offset() const { return _strings_offset; }
+  uint entries_count()  const { return _entries_count; }
   uint entries_offset() const { return _entries_offset; }
 };
 
@@ -160,6 +159,8 @@ public:
   uint decompile()    const { return _decompile; }
   bool not_entrant()  const { return _not_entrant; }
   void set_not_entrant()    { _not_entrant = true; }
+  void set_entrant()        { _not_entrant = false; }
+  void print() const;
 };
 
 // Addresses of stubs, blobs and runtime finctions called from compiled code.
@@ -263,7 +264,8 @@ private:
 
   SCAddressTable* _table;
 
-  SCAEntry* _load_entries;                      // Used when reading archive
+  SCAEntry* _load_entries;     // Used when reading archive
+  uint*     _search_entries;   // sorted by ID table [id, index]
   GrowableArray<SCAEntry>* _store_entries; // Used when writing archive
   const char* _C_strings_buf; // Loaded buffer for _C_strings[] table
 
