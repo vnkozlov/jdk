@@ -82,8 +82,6 @@ bool C2Compiler::init_c2_runtime() {
 
   Compile::pd_compiler2_init();
 
-  SCAFile::init_table();
-
   CompilerThread* thread = CompilerThread::current();
 
   HandleMark handle_mark(thread);
@@ -113,7 +111,7 @@ void C2Compiler::initialize() {
 void C2Compiler::compile_method(ciEnv* env, ciMethod* target, int entry_bci, bool install_code, DirectiveSet* directive) {
   assert(is_initialized(), "Compiler thread must be initialized");
 
-  if (install_code && SCAFile::load_nmethod(env, target, entry_bci, this)) {
+  if (install_code && SCAFile::load_nmethod(env, target, entry_bci, this, CompLevel_full_optimization)) {
     return;
   }
   bool subsume_loads = SubsumeLoads;

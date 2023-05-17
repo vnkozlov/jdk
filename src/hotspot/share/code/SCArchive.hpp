@@ -43,6 +43,7 @@ class StubCodeGenerator;
 template <typename T> class GrowableArray;
 
 enum class vmIntrinsicID : int;
+enum CompLevel : signed char;
 
 // Archive file header
 class SCAHeader : public CHeapObj<mtCode> {
@@ -175,18 +176,21 @@ private:
 
   bool _complete;
   bool _opto_complete;
+  bool _c1_complete;
 
 public:
-  SCAddressTable() { _complete = false; _opto_complete = false; }
+  SCAddressTable() { _complete = false; _opto_complete = false; _c1_complete = false; }
   ~SCAddressTable();
   void init();
   void init_opto();
+  void init_c1();
   void add_C_string(const char* str);
   int  id_for_C_string(address str);
   address address_for_C_string(int idx);
   int  id_for_address(address addr);
   address address_for_id(int id);
   bool opto_complete() const { return _opto_complete; }
+  bool c1_complete() const { return _c1_complete; }
 };
 
 struct SCACodeSection {
@@ -298,6 +302,7 @@ public:
 
   static void init_table();
   static void init_opto_table();
+  static void init_c1_table();
   address address_for_id(int id) const { return _table->address_for_id(id); } 
 
   bool for_read() const;
@@ -338,7 +343,7 @@ public:
   static bool load_exception_blob(CodeBuffer* buffer, int* pc_offset);
   static bool store_exception_blob(CodeBuffer* buffer, int pc_offset);
 
-  static bool load_nmethod(ciEnv* env, ciMethod* target, int entry_bci, AbstractCompiler* compiler);
+  static bool load_nmethod(ciEnv* env, ciMethod* target, int entry_bci, AbstractCompiler* compiler, CompLevel comp_level);
 
   static SCAEntry* store_nmethod(const methodHandle& method,
                      int compile_id,
@@ -353,6 +358,7 @@ public:
                      ExceptionHandlerTable* handler_table,
                      ImplicitExceptionTable* nul_chk_table,
                      AbstractCompiler* compiler,
+                     CompLevel comp_level,
                      bool has_unsafe_access,
                      bool has_wide_vectors,
                      bool has_monitors);

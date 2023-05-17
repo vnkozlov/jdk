@@ -56,6 +56,11 @@
 #include "runtime/stubCodeGenerator.hpp"
 #include "runtime/stubRoutines.hpp"
 #include "runtime/threadIdentifier.hpp"
+#ifdef COMPILER1
+#include "c1/c1_Runtime1.hpp"
+#include "gc/shared/c1/barrierSetC1.hpp"
+#include "gc/g1/c1/g1BarrierSetC1.hpp"
+#endif
 #ifdef COMPILER2
 #include "opto/runtime.hpp"
 #endif
@@ -240,6 +245,13 @@ void SCAFile::init_opto_table() {
   SCAFile* archive = SCArchive::archive();
   if (archive != nullptr && archive->_table != nullptr) {
     archive->_table->init_opto();
+  }
+}
+
+void SCAFile::init_c1_table() {
+  SCAFile* archive = SCArchive::archive();
+  if (archive != nullptr && archive->_table != nullptr) {
+    archive->_table->init_c1();
   }
 }
 
@@ -615,10 +627,11 @@ bool SCAFile::finish_write() {
     }
     assert(entries_count <= (store_count + load_count), "%d > (%d + %d)", entries_count, store_count, load_count);
     // Write strings
-    copy_bytes((_store_buffer + strings_offset), (address)current, strings_size);
-    strings_offset = (current - start); // New offset
-    current += strings_size;
-
+    if (strings_count > 0) {
+      copy_bytes((_store_buffer + strings_offset), (address)current, strings_size);
+      strings_offset = (current - start); // New offset
+      current += strings_size;
+    }
     uint new_entries_offset = (current - start); // New offset
     // Sort and store search table
     qsort(search, entries_count, 2*sizeof(uint), uint_cmp);
@@ -851,6 +864,10 @@ Method* SCAReader::read_method(const methodHandle& comp_method) {
 }
 
 bool SCAFile::write_klass(Klass* klass) {
+  if (klass->is_hidden()) { // Skip such nmethod
+    set_lookup_failed();
+    return false;
+  }
   ResourceMark rm;
   Symbol* name = klass->name();
   int name_length = name->utf8_length();
@@ -893,6 +910,10 @@ if (UseNewCode) {
 }
 
 bool SCAFile::write_method(Method* method) {
+  if (method->is_hidden()) { // Skip such nmethod
+    set_lookup_failed(); 
+    return false;
+  }
   ResourceMark rm;
   Symbol* name   = method->name();
   Symbol* holder = method->klass_name();
@@ -1110,7 +1131,7 @@ bool SCAReader::read_relocations(CodeBuffer* buffer, CodeBuffer* orig_buffer,
           break;
       }
 #ifdef ASSERT
-      if (UseNewCode) {
+      if (success && UseNewCode) {
         iter.print_current();
       }
 #endif
@@ -1332,6 +1353,11 @@ bool SCAFile::write_relocations(CodeBuffer* buffer, uint& max_reloc_size) {
           fatal("relocation %d unimplemented", (int)iter.type());
           break;
       }
+#ifdef ASSERT
+      if (UseNewCode) {
+        iter.print_current();
+      }
+#endif
       j++;
     }
     assert(j <= (int)reloc_count, "sanity");
@@ -1386,7 +1412,7 @@ bool SCAFile::write_relocations(CodeBuffer* buffer, uint& max_reloc_size) {
 
 bool SCAFile::write_code(CodeBuffer* buffer, uint& code_size) {
   assert(_write_position == align_up(_write_position, DATA_ALIGNMENT), "%d not aligned to %d", _write_position, DATA_ALIGNMENT);
-  assert(buffer->blob() != nullptr, "sanity");
+  //assert(buffer->blob() != nullptr, "sanity");
   uint code_offset = _write_position;
   uint cb_total_size = (uint)buffer->total_content_size();
   // Write information about Code sections first.
@@ -1936,19 +1962,18 @@ if (UseNewCode) {
   return true;
 }
 
-bool SCAFile::load_nmethod(ciEnv* env, ciMethod* target, int entry_bci, AbstractCompiler* compiler) {
+bool SCAFile::load_nmethod(ciEnv* env, ciMethod* target, int entry_bci, AbstractCompiler* compiler, CompLevel comp_level) {
   if (entry_bci != InvocationEntryBci) {
     return false; // No OSR
   }
-  if (!compiler->is_c2()) {
+  if (compiler->is_c1() && (comp_level == CompLevel_simple)) {
+    // Load tier1 compilations
+  } else if (!compiler->is_c2()) {
     return false; // Only C2 now
   }
   SCAFile* archive = open_for_read();
   if (archive == nullptr) {
     return false;
-  }
-  if (!archive->_table->opto_complete()) {
-    return false; // C2 runtime stubs are not ready yet
   }
 
   ReadingMark rdmk;
@@ -1967,6 +1992,7 @@ bool SCAFile::load_nmethod(ciEnv* env, ciMethod* target, int entry_bci, Abstract
   SCAEntry* entry = archive->find_entry(SCAEntry::Code, hash, decomp);
   if (entry == nullptr) {
     log_info(sca, nmethod)("Missing entry for '%s' hash: " UINT32_FORMAT_X_0 ", decomp: %d", target_name, hash, decomp);
+    os::free((void*)target_name);
     return false;
   }
 
@@ -1996,6 +2022,7 @@ if (UseNewCode) tty->print_cr("=== load_nmethod: 1");
   if (strncmp(target_name, name, (name_size - 1)) != 0) {
     log_warning(sca)("Saved nmethod's name '%s' is different from '%s'", name, target_name);
     set_lookup_failed();
+    os::free((void*)target_name);
     return false;
   }
   os::free((void*)target_name);
@@ -2146,21 +2173,30 @@ SCAEntry* SCAFile::store_nmethod(const methodHandle& method,
                      ExceptionHandlerTable* handler_table,
                      ImplicitExceptionTable* nul_chk_table,
                      AbstractCompiler* compiler,
+                     CompLevel comp_level,
                      bool has_unsafe_access,
                      bool has_wide_vectors,
                      bool has_monitors) {
   if (entry_bci != InvocationEntryBci) {
     return nullptr; // No OSR
   }
-  if (!compiler->is_c2()) {
+  if (compiler->is_c1() && (comp_level == CompLevel_simple)) {
+    // Cache tier1 compilations
+  } else if (!compiler->is_c2()) {
     return nullptr; // Only C2 now
   }
   SCAFile* archive = open_for_write();
   if (archive == nullptr) {
     return nullptr; // Archive is closed
   }
+  if (method->is_hidden()) {
+    ResourceMark rm;
+    log_info(sca, nmethod)("Skip hidden method '%s'", method->name_and_sig_as_C_string());
+    return nullptr;
+  }
 #ifdef ASSERT
 if (UseNewCode3) {
+  tty->print_cr(" == store_nmethod");
   FlagSetting fs(PrintRelocations, true);
   buffer->print();
   buffer->decode();
@@ -2179,8 +2215,28 @@ if (UseNewCode3) {
   {
     ResourceMark rm;
     const char* name   = method->name_and_sig_as_C_string();
-    log_info(sca, nmethod)("Writing nmethod '%s' to shared code archive '%s'", name, archive->_archive_path);
+    log_info(sca, nmethod)("Writing nmethod '%s' comp level %d to shared code archive '%s'", name, comp_level, archive->_archive_path);
 
+if (UseNewCode) {
+  Klass* klass = method->method_holder();
+  oop loader = klass->class_loader();
+  oop domain = klass->protection_domain();
+  tty->print("Holder: ");
+  klass->print_value_on(tty);
+  tty->print(" loader: ");
+  if (loader == nullptr) {
+    tty->print("nullptr");
+  } else {
+    loader->print_value_on(tty);
+  }
+  tty->print(" domain: ");
+  if (domain == nullptr) {
+    tty->print("nullptr");
+  } else { 
+    domain->print_value_on(tty);
+  }
+  tty->cr();
+}
     name_offset = archive->_write_position  - entry_position;
     name_size   = (uint)strlen(name) + 1; // Includes '/0'
     n = archive->write_bytes(name, name_size);
@@ -2227,6 +2283,10 @@ if (UseNewCode3) {
     return nullptr;
   }
   if (!archive->write_metadata(buffer->oop_recorder())) {
+    if (archive->lookup_failed() && !archive->failed()) {
+      // Skip this method and reposition file
+      archive->set_write_position(entry_position);
+    }
     return nullptr;
   }
 
@@ -2309,18 +2369,20 @@ if (UseNewCode3) {
 }
 
 #define _extrs_max 20
-#define _stubs_max 110
-#define _blobs_max 40
-#define _all_max 170
+#define _stubs_max 120
+#define _blobs_max 80
+#define _all_max 220
 
 #define SET_ADDRESS(type, addr)                          \
   {                                                      \
     type##_addr[type##_length++] = (address) (addr);     \
-    assert(type##_length < type##_max, "increase size"); \
+    assert(type##_length < type##_max - 1, "increase size"); \
   }
 
+static bool initializing = false;
 void SCAddressTable::init() {
-  assert(!_complete, "init only once");
+  if (_complete || initializing) return; // Done already
+  initializing = true;
   _extrs_addr = NEW_C_HEAP_ARRAY(address, _extrs_max, mtCode);
   _stubs_addr = NEW_C_HEAP_ARRAY(address, _stubs_max, mtCode);
   _blobs_addr = NEW_C_HEAP_ARRAY(address, _blobs_max, mtCode);
@@ -2333,6 +2395,10 @@ void SCAddressTable::init() {
 #ifdef COMPILER2
   SET_ADDRESS(_extrs, OptoRuntime::handle_exception_C);
 #endif
+#ifdef COMPILER1
+  SET_ADDRESS(_extrs, Runtime1::is_instance_of);
+#endif
+
   SET_ADDRESS(_extrs, CompressedOops::ptrs_base_addr());
   SET_ADDRESS(_extrs, G1BarrierSetRuntime::write_ref_field_post_entry);
   SET_ADDRESS(_extrs, G1BarrierSetRuntime::write_ref_field_pre_entry);
@@ -2341,6 +2407,7 @@ void SCAddressTable::init() {
   SET_ADDRESS(_extrs, SharedRuntime::enable_stack_reserved_zone);
   SET_ADDRESS(_extrs, ci_card_table_address_as<address>());
   SET_ADDRESS(_extrs, ThreadIdentifier::unsafe_offset());
+  SET_ADDRESS(_extrs, Thread::current);
 
   SET_ADDRESS(_extrs, os::javaTimeMillis);
   SET_ADDRESS(_extrs, os::javaTimeNanos);
@@ -2545,6 +2612,35 @@ void SCAddressTable::init_opto() {
   _opto_complete = true;
 }
 
+void SCAddressTable::init_c1() {
+#ifdef COMPILER1
+  // Runtime1 Blobs
+  for (int i = 0; i < Runtime1::number_of_ids; i++) {
+    Runtime1::StubID id = (Runtime1::StubID)i;
+    if (Runtime1::blob_for(id) == nullptr) {
+      log_info(sca, init)("C1 blob %s is missing", Runtime1::name_for(id));
+      continue;
+    }
+    if (Runtime1::entry_for(id) == nullptr) {
+      log_info(sca, init)("C1 blob %s is missing entry", Runtime1::name_for(id));
+      continue;
+    }
+    address entry = Runtime1::entry_for(id);
+    SET_ADDRESS(_blobs, entry);
+  }
+#if INCLUDE_G1GC
+  if (UseG1GC) {
+    G1BarrierSetC1* bs = (G1BarrierSetC1*)BarrierSet::barrier_set()->barrier_set_c1();
+    address entry = bs->pre_barrier_c1_runtime_code_blob()->code_begin();
+    SET_ADDRESS(_blobs, entry);
+    entry = bs->post_barrier_c1_runtime_code_blob()->code_begin();
+    SET_ADDRESS(_blobs, entry);
+  }
+#endif // INCLUDE_G1GC
+#endif // COMPILER1
+  _c1_complete = true;
+}
+
 #undef SET_ADDRESS
 #undef _extrs_max
 #undef _stubs_max
@@ -2639,7 +2735,7 @@ void SCAFile::add_C_string(const char* str) {
 }
 
 void SCAddressTable::add_C_string(const char* str) {
-  if (str != nullptr && _complete && _opto_complete) {
+  if (str != nullptr && _complete && (_opto_complete || _c1_complete)) {
     // Check previous strings address
     for (int i = 0; i < _C_strings_count; i++) {
       if (_C_strings[i] == str) {

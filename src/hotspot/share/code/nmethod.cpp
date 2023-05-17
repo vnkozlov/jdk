@@ -558,6 +558,14 @@ nmethod* nmethod::new_nmethod(const methodHandle& method,
 #endif
 )
 {
+#ifdef ASSERT
+if (UseNewCode3) {
+  tty->print_cr("== new_nmethod 1");
+  FlagSetting fs(PrintRelocations, true);
+  code_buffer->print();
+  code_buffer->decode();
+}
+#endif
   assert(debug_info->oop_recorder() == code_buffer->oop_recorder(), "shared OR");
   code_buffer->finalize_oop_references(method);
   // create nmethod
@@ -632,6 +640,7 @@ nmethod* nmethod::new_nmethod(const methodHandle& method,
 
 #ifdef ASSERT
 if (UseNewCode3) {
+  tty->print_cr("== new_nmethod 2");
   FlagSetting fs(PrintRelocations, true);
   nm->print();
   nm->decode(tty);

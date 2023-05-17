@@ -1806,6 +1806,7 @@ bool CompileBroker::init_compiler_runtime() {
     ThreadInVMfromNative tv(thread);
 
     // Perform per-thread and global initializations
+    SCAFile::init_table();
     comp->initialize();
   }
 
