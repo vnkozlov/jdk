@@ -833,6 +833,15 @@ Method* SCAReader::read_method(const methodHandle& comp_method) {
     assert(!thread->has_pending_exception(), "should not throw");
   }
   if (k != nullptr) {
+    if (!k->is_instance_klass()) {
+      set_lookup_failed();
+      log_info(sca)("Lookup failed for holder %s: not instance klass", &(dest[0]));
+      return nullptr;
+    } else if (!InstanceKlass::cast(k)->is_linked()) {
+      set_lookup_failed();
+      log_info(sca)("Lookup failed for holder %s: not linked", &(dest[0]));
+      return nullptr;
+    }
     log_info(sca)("Holder lookup: %s", k->external_name());
   } else {
     set_lookup_failed();
