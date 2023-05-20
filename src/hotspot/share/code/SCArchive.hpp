@@ -98,6 +98,7 @@ private:
   uint   _reloc_size;  // Max size of relocations per code section
   uint   _num_inlined_bytecodes;
 
+  uint   _comp_level;  // compilation level
   uint   _decompile;   // Decompile count for this nmethod
   bool   _not_entrant; // Deoptimized
 
@@ -105,7 +106,7 @@ public:
   SCAEntry(uint offset, uint size, uint name_offset, uint name_size,
            uint code_offset, uint code_size,
            uint reloc_offset, uint reloc_size,
-           Kind kind, uint id, uint decomp = 0) {
+           Kind kind, uint id, uint comp_level = 0, uint decomp = 0) {
     _kind         = kind;
     _id           = id;
 
@@ -119,6 +120,7 @@ public:
     _reloc_size   = reloc_size;
     _num_inlined_bytecodes = 0;
 
+    _comp_level   = comp_level;
     _decompile    = decomp;
     _not_entrant  = false;
   }
@@ -137,6 +139,7 @@ public:
     _reloc_size   = 0;
     _num_inlined_bytecodes = 0;
 
+    _comp_level   = 0;
     _decompile    = 0;
     _not_entrant  = false;
   }
@@ -157,6 +160,7 @@ public:
   uint num_inlined_bytecodes() const { return _num_inlined_bytecodes; }
   void set_inlined_bytecodes(int bytes) { _num_inlined_bytecodes = bytes; }
 
+  uint comp_level()   const { return _comp_level; }
   uint decompile()    const { return _decompile; }
   bool not_entrant()  const { return _not_entrant; }
   void set_not_entrant()    { _not_entrant = true; }
@@ -314,7 +318,7 @@ public:
   void add_C_string(const char* str);
 
   SCAEntry* add_entry(SCAEntry entry);
-  SCAEntry* find_entry(SCAEntry::Kind kind, uint id, uint decomp = 0);
+  SCAEntry* find_entry(SCAEntry::Kind kind, uint id, uint comp_level = 0, uint decomp = 0);
   void invalidate(SCAEntry* entry);
 
   bool finish_write();
@@ -375,6 +379,7 @@ public:
   static void initialize();
   static void close();
   static bool is_on() { return _archive != nullptr; }
+  static bool is_C3_on();
   static bool is_on_for_read()  { return _archive != nullptr && _archive->for_read(); }
   static bool is_on_for_write() { return _archive != nullptr && _archive->for_write(); }
   static bool allow_const_field(ciConstant& value);

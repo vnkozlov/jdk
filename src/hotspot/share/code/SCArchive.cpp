@@ -100,6 +100,15 @@ void SCArchive::initialize() {
   }
 }
 
+bool SCArchive::is_C3_on() {
+#if INCLUDE_JVMCI
+  if (UseJVMCICompiler) {
+    return (StoreSharedCode || LoadSharedCode) && UseC2asC3;
+  }
+#endif
+  return false;
+}
+
 void SCArchive::close() {
   if (_archive != nullptr) {
     delete _archive; // Free memory
@@ -417,17 +426,17 @@ SCAEntry* SCAFile::add_entry(SCAEntry entry) {
   return _store_entries->adr_at(_store_entries->length() - 1); // Last
 }
 
-static bool check_entry(SCAEntry::Kind kind, uint id, uint decomp, SCAEntry* entry) {
+static bool check_entry(SCAEntry::Kind kind, uint id, uint comp_level, uint decomp, SCAEntry* entry) {
   if (entry->kind() == kind) {
     assert(entry->id() == id, "sanity");
-    if (kind != SCAEntry::Code || (!entry->not_entrant() && entry->decompile() == decomp)) {
+    if (kind != SCAEntry::Code || (!entry->not_entrant() && entry->comp_level() == comp_level && entry->decompile() == decomp)) {
       return true; // Found
     }
   }
   return false;
 }
 
-SCAEntry* SCAFile::find_entry(SCAEntry::Kind kind, uint id, uint decomp) {
+SCAEntry* SCAFile::find_entry(SCAEntry::Kind kind, uint id, uint comp_level, uint decomp) {
   assert(_for_read, "sanity");
   uint count = _load_header->entries_count();
   if (_load_entries == nullptr) {
@@ -446,7 +455,7 @@ SCAEntry* SCAFile::find_entry(SCAEntry::Kind kind, uint id, uint decomp) {
     if (is == id) {
       int index = _search_entries[ix + 1];
       SCAEntry* entry = &(_load_entries[index]); 
-      if (check_entry(kind, id, decomp, entry)) {
+      if (check_entry(kind, id, comp_level, decomp, entry)) {
         return entry; // Found
       }
       // Leaner search around (could be the same nmethod with different decompile count)
@@ -458,7 +467,7 @@ SCAEntry* SCAFile::find_entry(SCAEntry::Kind kind, uint id, uint decomp) {
         }
         index = _search_entries[ix + 1];
         SCAEntry* entry = &(_load_entries[index]);
-        if (check_entry(kind, id, decomp, entry)) {
+        if (check_entry(kind, id, comp_level, decomp, entry)) {
           return entry; // Found
         }
       }
@@ -470,7 +479,7 @@ SCAEntry* SCAFile::find_entry(SCAEntry::Kind kind, uint id, uint decomp) {
         }
         index = _search_entries[ix + 1];
         SCAEntry* entry = &(_load_entries[index]);
-        if (check_entry(kind, id, decomp, entry)) {
+        if (check_entry(kind, id, comp_level, decomp, entry)) {
           return entry; // Found
         }
       }
@@ -779,7 +788,7 @@ Klass* SCAReader::read_klass(const methodHandle& comp_method) {
   TempNewSymbol klass_sym = SymbolTable::probe(&(dest[0]), name_length);
   if (klass_sym == nullptr) {
     set_lookup_failed();
-    log_info(sca)("Probe failed for class %s", &(dest[0]));
+    log_warning(sca)("Probe failed for class %s", &(dest[0]));
     return nullptr;
   }
   // Use class loader of compiled method.
@@ -794,6 +803,11 @@ Klass* SCAReader::read_klass(const methodHandle& comp_method) {
     assert(!thread->has_pending_exception(), "should not throw");
   }
   if (k != nullptr) {
+   if (k->is_instance_klass() && !InstanceKlass::cast(k)->is_initialized()) {
+      set_lookup_failed();
+      log_warning(sca)("Lookup failed for klass %s: not initialized", &(dest[0]));
+      return nullptr;
+    }
     log_info(sca)("Klass lookup %s", k->external_name());
   } else {
     set_lookup_failed();
@@ -818,7 +832,7 @@ Method* SCAReader::read_method(const methodHandle& comp_method) {
   TempNewSymbol klass_sym = SymbolTable::probe(&(dest[0]), holder_length);
   if (klass_sym == nullptr) {
     set_lookup_failed();
-    log_info(sca)("Probe failed for class %s", &(dest[0]));
+    log_warning(sca)("Probe failed for class %s", &(dest[0]));
     return nullptr;
   }
   // Use class loader of compiled method.
@@ -835,11 +849,11 @@ Method* SCAReader::read_method(const methodHandle& comp_method) {
   if (k != nullptr) {
     if (!k->is_instance_klass()) {
       set_lookup_failed();
-      log_info(sca)("Lookup failed for holder %s: not instance klass", &(dest[0]));
+      log_warning(sca)("Lookup failed for holder %s: not instance klass", &(dest[0]));
       return nullptr;
     } else if (!InstanceKlass::cast(k)->is_linked()) {
       set_lookup_failed();
-      log_info(sca)("Lookup failed for holder %s: not linked", &(dest[0]));
+      log_warning(sca)("Lookup failed for holder %s: not linked", &(dest[0]));
       return nullptr;
     }
     log_info(sca)("Holder lookup: %s", k->external_name());
@@ -853,12 +867,12 @@ Method* SCAReader::read_method(const methodHandle& comp_method) {
   TempNewSymbol sign_sym = SymbolTable::probe(&(dest[pos]), signat_length);
   if (name_sym == nullptr) {
     set_lookup_failed();
-    log_info(sca)("Probe failed for method name %s", &(dest[holder_length + 1]));
+    log_warning(sca)("Probe failed for method name %s", &(dest[holder_length + 1]));
     return nullptr;
   }
   if (sign_sym == nullptr) {
     set_lookup_failed();
-    log_info(sca)("Probe failed for method signature %s", &(dest[pos]));
+    log_warning(sca)("Probe failed for method signature %s", &(dest[pos]));
     return nullptr;
   }
   Method* m = InstanceKlass::cast(k)->find_method(name_sym, sign_sym);
@@ -866,7 +880,7 @@ Method* SCAReader::read_method(const methodHandle& comp_method) {
     log_info(sca)("Method lookup: %s", m->name_and_sig_as_C_string());
   } else {
     set_lookup_failed();
-    log_info(sca)("Lookup failed for method %s%s", &(dest[holder_length + 1]), &(dest[pos]));
+    log_warning(sca)("Lookup failed for method %s::%s%s", &(dest[0]), &(dest[holder_length + 1]), &(dest[pos]));
     return nullptr;
   }
   return m;
@@ -1674,7 +1688,7 @@ jobject SCAReader::read_oop(JavaThread* thread, const methodHandle& comp_method)
     obj = StringTable::intern(&(dest[0]), thread);
     if (obj == nullptr) {
       set_lookup_failed();
-      log_info(sca)("Lookup failed for String %s", &(dest[0]));
+      log_warning(sca)("Lookup failed for String %s", &(dest[0]));
       return nullptr;
     }
     assert(java_lang_String::is_instance(obj), "must be string");
@@ -1687,7 +1701,7 @@ jobject SCAReader::read_oop(JavaThread* thread, const methodHandle& comp_method)
     log_info(sca)("Read java_platform_loader");
   } else {
     set_lookup_failed();
-    log_info(sca)("Unknown oop's kind: %d", (int)kind);
+    log_warning(sca)("Unknown oop's kind: %d", (int)kind);
     return nullptr;
   }
   return JNIHandles::make_local(thread, obj);
@@ -1745,7 +1759,7 @@ Metadata* SCAReader::read_metadata(const methodHandle& comp_method) {
     m = (Metadata*)read_method(comp_method);
   } else {
     set_lookup_failed();
-    log_info(sca)("Unknown metadata's kind: %d", (int)kind);
+    log_warning(sca)("Unknown metadata's kind: %d", (int)kind);
   }
   return m;
 }
@@ -1861,7 +1875,7 @@ bool SCAFile::write_oop(jobject& jo) {
   } else {
     // Unhandled oop - bailout
     set_lookup_failed();
-    log_info(sca, nmethod)("Unhandled obj: " PTR_FORMAT " : %s", p2i(obj), obj->klass()->external_name());
+    log_warning(sca, nmethod)("Unhandled obj: " PTR_FORMAT " : %s", p2i(obj), obj->klass()->external_name());
     return false;
   }
   return true;
@@ -1998,7 +2012,7 @@ bool SCAFile::load_nmethod(ciEnv* env, ciMethod* target, int entry_bci, Abstract
   uint hash = java_lang_String::hash_code((const jbyte*)target_name, strlen(target_name));
   log_info(sca, nmethod)("Reading nmethod '%s' (decomp: %d) from shared code archive '%s'", target_name, decomp, archive->_archive_path);
 
-  SCAEntry* entry = archive->find_entry(SCAEntry::Code, hash, decomp);
+  SCAEntry* entry = archive->find_entry(SCAEntry::Code, hash, (uint)comp_level, decomp);
   if (entry == nullptr) {
     log_info(sca, nmethod)("Missing entry for '%s' hash: " UINT32_FORMAT_X_0 ", decomp: %d", target_name, hash, decomp);
     os::free((void*)target_name);
@@ -2368,7 +2382,7 @@ if (UseNewCode) {
   uint entry_size = archive->_write_position - entry_position;
   SCAEntry entry(entry_position, entry_size, name_offset, name_size,
                  code_offset, code_size, reloc_offset, reloc_size,
-                 SCAEntry::Code, hash, decomp);
+                 SCAEntry::Code, hash, (uint)comp_level, decomp);
   {
     ResourceMark rm;
     const char* name   = method->name_and_sig_as_C_string();
@@ -2377,10 +2391,10 @@ if (UseNewCode) {
   return archive->add_entry(entry);
 }
 
-#define _extrs_max 20
+#define _extrs_max 40
 #define _stubs_max 120
 #define _blobs_max 80
-#define _all_max 220
+#define _all_max 240
 
 #define SET_ADDRESS(type, addr)                          \
   {                                                      \
@@ -2406,6 +2420,7 @@ void SCAddressTable::init() {
 #endif
 #ifdef COMPILER1
   SET_ADDRESS(_extrs, Runtime1::is_instance_of);
+  SET_ADDRESS(_extrs, Runtime1::trace_block_entry);
 #endif
 
   SET_ADDRESS(_extrs, CompressedOops::ptrs_base_addr());
@@ -2414,6 +2429,27 @@ void SCAddressTable::init() {
 
   SET_ADDRESS(_extrs, SharedRuntime::complete_monitor_unlocking_C);
   SET_ADDRESS(_extrs, SharedRuntime::enable_stack_reserved_zone);
+
+  SET_ADDRESS(_extrs, SharedRuntime::d2f);
+  SET_ADDRESS(_extrs, SharedRuntime::d2i);
+  SET_ADDRESS(_extrs, SharedRuntime::d2l);
+  SET_ADDRESS(_extrs, SharedRuntime::dcos);
+  SET_ADDRESS(_extrs, SharedRuntime::dexp);
+  SET_ADDRESS(_extrs, SharedRuntime::dlog);
+  SET_ADDRESS(_extrs, SharedRuntime::dlog10);
+  SET_ADDRESS(_extrs, SharedRuntime::dpow);
+  SET_ADDRESS(_extrs, SharedRuntime::drem);
+  SET_ADDRESS(_extrs, SharedRuntime::dsin);
+  SET_ADDRESS(_extrs, SharedRuntime::dtan);
+  SET_ADDRESS(_extrs, SharedRuntime::f2i);
+  SET_ADDRESS(_extrs, SharedRuntime::f2l);
+  SET_ADDRESS(_extrs, SharedRuntime::frem);
+  SET_ADDRESS(_extrs, SharedRuntime::l2d);
+  SET_ADDRESS(_extrs, SharedRuntime::l2f);
+  SET_ADDRESS(_extrs, SharedRuntime::ldiv);
+  SET_ADDRESS(_extrs, SharedRuntime::lmul);
+  SET_ADDRESS(_extrs, SharedRuntime::lrem);
+
   SET_ADDRESS(_extrs, ci_card_table_address_as<address>());
   SET_ADDRESS(_extrs, ThreadIdentifier::unsafe_offset());
   SET_ADDRESS(_extrs, Thread::current);

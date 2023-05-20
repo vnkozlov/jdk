@@ -205,7 +205,7 @@ bool CompilationPolicy::force_comp_at_level_simple(const methodHandle& method) {
     if (UseJVMCICompiler) {
       AbstractCompiler* comp = CompileBroker::compiler(CompLevel_full_optimization);
       if (comp != nullptr && comp->is_jvmci() && ((JVMCICompiler*) comp)->force_comp_at_level_simple(method)) {
-        return !SCArchive::is_on();
+        return !SCArchive::is_C3_on();
       }
     }
 #endif
@@ -490,7 +490,7 @@ void CompilationPolicy::initialize() {
         int c1_count = MAX2(count - libjvmci_count, 1);
         set_c2_count(libjvmci_count);
         set_c1_count(c1_count);
-      } else if (UseJVMCICompiler && (StoreSharedCode || LoadSharedCode)) {
+      } else if (SCArchive::is_C3_on()) {
         set_c1_count(MAX2(count / 3, 1));
         set_c2_count(MAX2(count - c1_count(), 1));
         set_c3_count(1);
