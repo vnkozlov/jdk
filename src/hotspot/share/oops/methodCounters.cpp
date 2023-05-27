@@ -23,11 +23,13 @@
  */
 #include "precompiled.hpp"
 #include "compiler/compiler_globals.hpp"
+#include "memory/metaspaceClosure.hpp"
 #include "oops/method.hpp"
 #include "oops/methodCounters.hpp"
 #include "runtime/handles.inline.hpp"
 
 MethodCounters::MethodCounters(const methodHandle& mh) :
+  _method(mh()),
   _prev_time(0),
   _rate(0),
   _highest_comp_level(0),
@@ -54,6 +56,11 @@ MethodCounters* MethodCounters::allocate_no_exception(const methodHandle& mh) {
 MethodCounters* MethodCounters::allocate_with_exception(const methodHandle& mh, TRAPS) {
   ClassLoaderData* loader_data = mh->method_holder()->class_loader_data();
   return new(loader_data, method_counters_size(), MetaspaceObj::MethodCountersType, THREAD) MethodCounters(mh);
+}
+
+void MethodCounters::metaspace_pointers_do(MetaspaceClosure* it) {
+  log_trace(cds)("Iter(MethodCounters): %p", this);
+  it->push(&_method);
 }
 
 void MethodCounters::clear_counters() {

@@ -2504,6 +2504,9 @@ void nmethod::print(outputStream* st) const {
                                              p2i(jvmci_data_end()),
                                              jvmci_data_size());
 #endif
+  if (_sca_entry != nullptr) {
+    _sca_entry->print(st);
+  }
 }
 
 void nmethod::print_code() {

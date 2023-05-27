@@ -35,6 +35,9 @@ class MethodCounters : public Metadata {
  friend class VMStructs;
  friend class JVMCIVMStructs;
  private:
+  // Back pointer to the Method*
+  Method* _method;
+
   InvocationCounter _invocation_counter;         // Incremented before each activation of the method - used to trigger frequency-based optimizations
   InvocationCounter _backedge_counter;           // Incremented before each backedge taken - used to trigger frequency-based optimizations
   jlong             _prev_time;                   // Previous time the rate was acquired
@@ -55,6 +58,8 @@ class MethodCounters : public Metadata {
  public:
   virtual bool is_methodCounters() const { return true; }
 
+  Method* method() const { return _method; }
+
   static MethodCounters* allocate_no_exception(const methodHandle& mh);
   static MethodCounters* allocate_with_exception(const methodHandle& mh, TRAPS);
 
@@ -67,6 +72,8 @@ class MethodCounters : public Metadata {
     return method_counters_size();
   }
   MetaspaceObj::Type type() const { return MethodCountersType; }
+  virtual void metaspace_pointers_do(MetaspaceClosure* iter);
+
   void clear_counters();
 
 #if COMPILER2_OR_JVMCI
