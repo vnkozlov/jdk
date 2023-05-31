@@ -131,6 +131,7 @@ class CompileTask : public CHeapObj<mtCompiler> {
   bool         is_success() const                { return _is_success; }
   bool         is_sca() const                    { return _is_sca; }
   void         set_sca()                         { _is_sca = true; }
+  void         clear_sca()                       { _is_sca = false; }
   DirectiveSet* directive() const                { return _directive; }
   CodeSection::csize_t nm_content_size() { return _nm_content_size; }
   void         set_nm_content_size(CodeSection::csize_t size) { _nm_content_size = size; }
