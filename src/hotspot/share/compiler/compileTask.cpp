@@ -149,6 +149,7 @@ void CompileTask::initialize(int compile_id,
     }
   }
 
+  _entry = nullptr;
   if (osr_bci == InvocationEntryBci && SCArchive::is_on_for_read()) {
     // Check for cached code.
     _entry = SCArchive::find_code_entry(method, comp_level);
