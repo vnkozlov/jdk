@@ -32,6 +32,7 @@
 #include "utilities/xmlstream.hpp"
 
 class DirectiveSet;
+class SCAEntry;
 
 JVMCI_ONLY(class JVMCICompileState;)
 
@@ -89,6 +90,7 @@ class CompileTask : public CHeapObj<mtCompiler> {
   CodeSection::csize_t _nm_insts_size;
   DirectiveSet*  _directive;
   AbstractCompiler*    _compiler;
+  SCAEntry*            _entry;
 #if INCLUDE_JVMCI
   bool                 _has_waiter;
   // Compilation state for a blocking JVMCI compilation
@@ -131,7 +133,8 @@ class CompileTask : public CHeapObj<mtCompiler> {
   bool         is_success() const                { return _is_success; }
   bool         is_sca() const                    { return _is_sca; }
   void         set_sca()                         { _is_sca = true; }
-  void         clear_sca()                       { _is_sca = false; }
+  void         clear_sca()                       { _is_sca = false; _entry = nullptr; }
+  SCAEntry*    sca_entry()                       { return _entry; }
   DirectiveSet* directive() const                { return _directive; }
   CodeSection::csize_t nm_content_size() { return _nm_content_size; }
   void         set_nm_content_size(CodeSection::csize_t size) { _nm_content_size = size; }
