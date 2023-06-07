@@ -84,13 +84,12 @@ class CompileTask : public CHeapObj<mtCompiler> {
   bool                 _is_complete;
   bool                 _is_success;
   bool                 _is_blocking;
-  bool                 _is_sca;
   CodeSection::csize_t _nm_content_size;
   CodeSection::csize_t _nm_total_size;
   CodeSection::csize_t _nm_insts_size;
   DirectiveSet*  _directive;
   AbstractCompiler*    _compiler;
-  SCAEntry*            _entry;
+  SCAEntry*            _sca_entry;
 #if INCLUDE_JVMCI
   bool                 _has_waiter;
   // Compilation state for a blocking JVMCI compilation
@@ -131,10 +130,9 @@ class CompileTask : public CHeapObj<mtCompiler> {
   bool         is_complete() const               { return _is_complete; }
   bool         is_blocking() const               { return _is_blocking; }
   bool         is_success() const                { return _is_success; }
-  bool         is_sca() const                    { return _is_sca; }
-  void         set_sca()                         { _is_sca = true; }
-  void         clear_sca()                       { _is_sca = false; _entry = nullptr; }
-  SCAEntry*    sca_entry()                       { return _entry; }
+  bool         is_sca() const                    { return _sca_entry != nullptr; }
+  void         clear_sca()                       { _sca_entry = nullptr; }
+  SCAEntry*    sca_entry()                       { return _sca_entry; }
   DirectiveSet* directive() const                { return _directive; }
   CodeSection::csize_t nm_content_size() { return _nm_content_size; }
   void         set_nm_content_size(CodeSection::csize_t size) { _nm_content_size = size; }
