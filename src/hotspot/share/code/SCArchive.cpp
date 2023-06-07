@@ -56,6 +56,7 @@
 #include "runtime/sharedRuntime.hpp"
 #include "runtime/stubCodeGenerator.hpp"
 #include "runtime/stubRoutines.hpp"
+#include "runtime/timerTrace.hpp"
 #include "runtime/threadIdentifier.hpp"
 #ifdef COMPILER1
 #include "c1/c1_Runtime1.hpp"
@@ -80,6 +81,10 @@
     const char pathSep = ':';
 #endif
 
+static elapsedTimer _t_totalLoad;
+static elapsedTimer _t_totalRegister;
+static elapsedTimer _t_totalStore;
+
 SCAFile* SCArchive::_archive = nullptr;
 
 void SCArchive::initialize() {
@@ -99,6 +104,16 @@ void SCArchive::initialize() {
     FLAG_SET_DEFAULT(FoldStableValues, false);
     FLAG_SET_DEFAULT(ForceUnreachable, true);
     FLAG_SET_DEFAULT(DelayCompilerStubsGeneration, false);
+  }
+}
+
+void SCArchive::print_timers() {
+  if (LoadSharedCode) {
+    tty->print_cr ("    SC Load Time:         %7.3f s", _t_totalLoad.seconds());
+    tty->print_cr ("      nmethod register:     %7.3f s", _t_totalRegister.seconds());
+  }
+  if (StoreSharedCode) {
+    tty->print_cr ("    SC Store Time:        %7.3f s", _t_totalStore.seconds());
   }
 }
 
@@ -2141,6 +2156,7 @@ if (UseNewCode) {
 }
 
 bool SCAFile::load_nmethod(ciEnv* env, ciMethod* target, int entry_bci, AbstractCompiler* compiler, CompLevel comp_level) {
+  TraceTime t1("SC total load time", &_t_totalLoad, CITime, false);
   CompileTask* task = env->task();
   SCAEntry* entry = task->sca_entry();
   assert(entry != nullptr, "sanity");
@@ -2289,6 +2305,7 @@ if (UseNewCode3) {
     return false;
   }
   // Register nmethod
+  TraceTime t1("SC total nmethod register time", &_t_totalRegister, CITime, false);
   env->register_method(target, entry_bci,
                        offsets, orig_pc_offset,
                        &buffer, frame_size,
@@ -2329,6 +2346,7 @@ SCAEntry* SCAFile::store_nmethod(const methodHandle& method,
   } else if (!compiler->is_c2()) {
     return nullptr; // Only C2 now
   }
+  TraceTime t1("SC total store time", &_t_totalStore, CITime, false);
   SCAFile* archive = open_for_write();
   if (archive == nullptr) {
     return nullptr; // Archive is closed
@@ -2340,6 +2358,7 @@ SCAEntry* SCAFile::store_nmethod(const methodHandle& method,
   }
   if (buffer->before_expand() != nullptr) {
     log_info(sca, nmethod)("Skip nmethod with expanded buffer '%s'", method->name_and_sig_as_C_string());
+    return nullptr;
   }
 #ifdef ASSERT
 if (UseNewCode3) {
