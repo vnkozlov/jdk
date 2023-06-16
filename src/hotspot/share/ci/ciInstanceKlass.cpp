@@ -50,11 +50,11 @@
 // ciInstanceKlass::ciInstanceKlass
 //
 // Loaded instance klass.
-ciInstanceKlass::ciInstanceKlass(Klass* k) :
+ciInstanceKlass::ciInstanceKlass(Klass* k, bool preload) :
   ciKlass(k)
 {
   assert(get_Klass()->is_instance_klass(), "wrong type");
-  assert(get_instanceKlass()->is_loaded(), "must be at least loaded");
+  assert(preload || get_instanceKlass()->is_loaded(), "must be at least loaded");
   InstanceKlass* ik = get_instanceKlass();
 
   AccessFlags access_flags = ik->access_flags();
@@ -76,8 +76,8 @@ ciInstanceKlass::ciInstanceKlass(Klass* k) :
   // by the GC but need to be strong roots if reachable from a current compilation.
   // InstanceKlass are created for both weak and strong metadata.  Ensuring this metadata
   // alive covers the cases where there are weak roots without performance cost.
-  oop holder = ik->klass_holder();
-  if (ik->class_loader_data()->has_class_mirror_holder()) {
+  oop holder = preload ? nullptr : ik->klass_holder();
+  if (!preload && ik->class_loader_data()->has_class_mirror_holder()) {
     // Though ciInstanceKlass records class loader oop, it's not enough to keep
     // non-strong hidden classes alive (loader == nullptr). Klass holder should
     // be used instead. It is enough to record a ciObject, since cached elements are never removed
@@ -88,7 +88,11 @@ ciInstanceKlass::ciInstanceKlass(Klass* k) :
   }
 
   JavaThread *thread = JavaThread::current();
-  if (ciObjectFactory::is_initialized()) {
+  if (preload) {
+    _loader = nullptr;
+    _protection_domain = nullptr;
+    _is_shared = false;
+  } else if (ciObjectFactory::is_initialized()) {
     _loader = JNIHandles::make_local(thread, ik->class_loader());
     _protection_domain = JNIHandles::make_local(thread,
                                                 ik->protection_domain());

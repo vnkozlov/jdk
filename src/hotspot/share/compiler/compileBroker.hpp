@@ -322,6 +322,8 @@ public:
   static void compiler_thread_loop();
   static int get_compilation_id() { return _compilation_id; }
 
+  static bool initialized() { return _initialized; }
+
   // Set _should_block.
   // Call this from the VM, with Threads_lock held and a safepoint requested.
   static void set_should_block();

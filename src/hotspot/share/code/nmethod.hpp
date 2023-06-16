@@ -347,6 +347,7 @@ class nmethod : public CompiledMethod {
                               AbstractCompiler* compiler,
                               CompLevel comp_level
                               , SCAEntry* sca_entry
+                              , bool preload = false
 #if INCLUDE_JVMCI
                               , char* speculations = nullptr,
                               int speculations_len = 0,
@@ -599,6 +600,8 @@ public:
   void copy_scopes_data(address buffer, int size);
 
   int orig_pc_offset() { return _orig_pc_offset; }
+
+  SCAEntry* sca_entry() const { return _sca_entry; }
 
   // Post successful compilation
   void post_compiled_method(CompileTask* task);

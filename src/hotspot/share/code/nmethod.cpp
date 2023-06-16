@@ -549,6 +549,7 @@ nmethod* nmethod::new_nmethod(const methodHandle& method,
   AbstractCompiler* compiler,
   CompLevel comp_level
   , SCAEntry* sca_entry
+  , bool preload
 #if INCLUDE_JVMCI
   , char* speculations,
   int speculations_len,
@@ -556,16 +557,8 @@ nmethod* nmethod::new_nmethod(const methodHandle& method,
 #endif
 )
 {
-#ifdef ASSERT
-if (UseNewCode3) {
-  tty->print_cr("== new_nmethod 1");
-  FlagSetting fs(PrintRelocations, true);
-  code_buffer->print();
-  code_buffer->decode();
-}
-#endif
   assert(debug_info->oop_recorder() == code_buffer->oop_recorder(), "shared OR");
-  code_buffer->finalize_oop_references(method);
+  if (!preload) code_buffer->finalize_oop_references(method);
   // create nmethod
   nmethod* nm = nullptr;
 #if INCLUDE_JVMCI
@@ -2201,6 +2194,9 @@ void nmethod::check_all_dependencies(DepChange& changes) {
   NMethodIterator iter(NMethodIterator::only_not_unloading);
   while(iter.next()) {
     nmethod* nm = iter.method();
+    if (nm->sca_entry() != nullptr && nm->sca_entry()->preloaded()) {
+      continue; // Skip checka for pre-loaded code
+    }
     // Only notify for live nmethods
     if (!nm->is_marked_for_deoptimization()) {
       for (Dependencies::DepStream deps(nm); deps.next(); ) {
@@ -2233,6 +2229,9 @@ bool nmethod::check_dependency_on(DepChange& changes) {
   // 1) a new class dependee has been added
   // 2) dependee and all its super classes have been marked
   bool found_check = false;  // set true if we are upset
+  if (_sca_entry != nullptr && _sca_entry->preloaded()) {
+    return false; // Skip checka for pre-loaded code
+  }
   for (Dependencies::DepStream deps(this); deps.next(); ) {
     // Evaluate only relevant dependencies.
     if (deps.spot_check_dependency_at(changes) != nullptr) {

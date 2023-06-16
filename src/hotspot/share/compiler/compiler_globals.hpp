@@ -388,11 +388,18 @@
   product(bool, LoadSharedCode, false,                                      \
           "Load compiled code")                                             \
                                                                             \
-  product(bool, UseMetadataPointers, false,                                 \
-          "Store Metadata pointers")                                        \
+  product(bool, UseMetadataPointers, true,                                  \
+          "Store Metadata pointers in Relocation Info for cached code")     \
                                                                             \
   product(bool, UseCodeLoadThread, true,                                    \
           "Use separate thread for cached code load")                       \
+                                                                            \
+  product(bool, StorePreloadCode, false,                                    \
+          "Generate shared code for preload before method execution, "      \
+          "generate class initialization checks in code")                   \
+                                                                            \
+  product(bool, PreloadSharedCode, false,                                   \
+          "Preload compiled code before method execution")                  \
                                                                             \
   product(ccstr, SharedCodeArchive, "code.jsa",                             \
           "File with compiled code")                                        \

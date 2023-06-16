@@ -72,7 +72,7 @@ private:
   static int metadata_compare(Metadata* const& key, ciMetadata* const& elt);
 
   ciObject* create_new_object(oop o);
-  ciMetadata* create_new_metadata(Metadata* o);
+  ciMetadata* create_new_metadata(Metadata* o, bool preload = false);
 
   static bool is_equal(NonPermObject* p, oop key) {
     return p->object()->get_oop() == key;
@@ -100,7 +100,7 @@ public:
 
   // Get the ciObject corresponding to some oop.
   ciObject* get(oop key);
-  ciMetadata* get_metadata(Metadata* key);
+  ciMetadata* get_metadata(Metadata* key, bool preload = false);
   ciMetadata* cached_metadata(Metadata* key);
   ciSymbol* get_symbol(Symbol* key);
 

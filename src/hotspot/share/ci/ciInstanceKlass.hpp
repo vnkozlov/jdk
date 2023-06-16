@@ -83,7 +83,7 @@ private:
   void compute_transitive_interfaces();
 
 protected:
-  ciInstanceKlass(Klass* k);
+  ciInstanceKlass(Klass* k, bool preload = false);
   ciInstanceKlass(ciSymbol* name, jobject loader, jobject protection_domain);
 
   InstanceKlass* get_instanceKlass() const {

@@ -176,17 +176,19 @@ class Options {
   const bool _do_iterative_escape_analysis;  // Do iterative escape analysis.
   const bool _eliminate_boxing;      // Do boxing elimination.
   const bool _do_locks_coarsening;   // Do locks coarsening
+  const bool _for_preload;           // Generate code for preload (before Java method execution), do class init barriers
   const bool _install_code;          // Install the code that was compiled
  public:
   Options(bool subsume_loads, bool do_escape_analysis,
           bool do_iterative_escape_analysis,
           bool eliminate_boxing, bool do_locks_coarsening,
-          bool install_code) :
+          bool for_preload, bool install_code) :
           _subsume_loads(subsume_loads),
           _do_escape_analysis(do_escape_analysis),
           _do_iterative_escape_analysis(do_iterative_escape_analysis),
           _eliminate_boxing(eliminate_boxing),
           _do_locks_coarsening(do_locks_coarsening),
+          _for_preload(for_preload),
           _install_code(install_code) {
   }
 
@@ -197,6 +199,7 @@ class Options {
        /* do_iterative_escape_analysis = */ false,
        /* eliminate_boxing = */ false,
        /* do_lock_coarsening = */ false,
+       /* for_preload = */ false,
        /* install_code = */ true
     );
   }
@@ -340,6 +343,7 @@ class Compile : public Phase {
   RTMState              _rtm_state;             // State of Restricted Transactional Memory usage
   int                   _loop_opts_cnt;         // loop opts round
   bool                  _clinit_barrier_on_entry; // True if clinit barrier is needed on nmethod entry
+  bool                  _has_clinit_barriers;   // True if compiled code has clinit barriers
   uint                  _stress_seed;           // Seed for stress testing
 
   // Compilation environment.
@@ -549,6 +553,9 @@ class Compile : public Phase {
   /** Do locks coarsening. */
   bool              do_locks_coarsening() const { return _options._do_locks_coarsening; }
 
+  bool              do_clinit_barriers()  const { return _options._for_preload; }
+  bool              for_preload()         const { return _options._for_preload; }
+
   // Other fixed compilation parameters.
   ciMethod*         method() const              { return _method; }
   int               entry_bci() const           { return _entry_bci; }
@@ -629,6 +636,8 @@ class Compile : public Phase {
   void          set_clinit_barrier_on_entry(bool z) { _clinit_barrier_on_entry = z; }
   bool              has_monitors() const         { return _has_monitors; }
   void          set_has_monitors(bool v)         { _has_monitors = v; }
+  bool              has_clinit_barriers()        { return _has_clinit_barriers; }
+  void          set_has_clinit_barriers(bool z)  { _has_clinit_barriers = z; }
 
   // check the CompilerOracle for special behaviours for this compile
   bool          method_has_option(enum CompileCommand option) {

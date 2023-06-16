@@ -41,6 +41,7 @@
 #include "code/oopRecorder.inline.hpp"
 #include "code/SCArchive.hpp"
 #include "compiler/abstractCompiler.hpp"
+#include "compiler/compileBroker.hpp"
 #include "compiler/compileTask.hpp"
 #include "gc/g1/g1BarrierSetRuntime.hpp"
 #include "logging/log.hpp"
@@ -88,6 +89,20 @@ static elapsedTimer _t_totalStore;
 SCAFile* SCArchive::_archive = nullptr;
 
 void SCArchive::initialize() {
+  if (StorePreloadCode) {
+    if (FLAG_IS_DEFAULT(StoreSharedCode)) {
+      FLAG_SET_DEFAULT(StoreSharedCode, true);
+    } else if (!StoreSharedCode) {
+      log_warning(sca, init)("Set StorePreloadCode to false because StoreSharedCode is set to false.");
+      FLAG_SET_DEFAULT(StorePreloadCode, false);
+    }
+  }
+  if (!LoadSharedCode && PreloadSharedCode) {
+    if (!FLAG_IS_DEFAULT(PreloadSharedCode)) {
+      log_warning(sca, init)("Set PreloadSharedCode to false because LoadSharedCode is set to false.");
+    }
+    FLAG_SET_DEFAULT(PreloadSharedCode, false);
+  }
   if ((LoadSharedCode || StoreSharedCode) && SharedCodeArchive != nullptr) {
     const int len = (int)strlen(SharedCodeArchive);
     char* cp  = NEW_C_HEAP_ARRAY(char, len+1, mtCode);
@@ -101,8 +116,10 @@ void SCArchive::initialize() {
       FREE_C_HEAP_ARRAY(char, cp);
       return;
     }
-    FLAG_SET_DEFAULT(FoldStableValues, false);
-    FLAG_SET_DEFAULT(ForceUnreachable, true);
+    if (StoreSharedCode) {
+      FLAG_SET_DEFAULT(FoldStableValues, false);
+      FLAG_SET_DEFAULT(ForceUnreachable, true);
+    }
     FLAG_SET_DEFAULT(DelayCompilerStubsGeneration, false);
   }
 }
@@ -130,6 +147,12 @@ bool SCArchive::is_SC_load_tread_on() {
   return UseCodeLoadThread && LoadSharedCode;
 }
 
+bool SCArchive::gen_preload_code(ciMethod* m) {
+  VM_ENTRY_MARK;
+  return _archive != nullptr && _archive->gen_preload_code() &&
+         MetaspaceShared::is_in_shared_metaspace((address)(m->get_Method()));
+}
+
 void SCArchive::close() {
   if (_archive != nullptr) {
     delete _archive; // Free memory
@@ -149,6 +172,13 @@ bool SCArchive::is_loaded(SCAEntry* entry) {
     return (uint)((char*)entry - _archive->archive_buffer()) < _archive->load_size();
   }
   return false;
+}
+
+void SCArchive::preload_code(JavaThread* thread) {
+  if (!PreloadSharedCode || !is_on_for_read()) {
+    return;
+  }
+  _archive->preload_code(thread);
 }
 
 SCAEntry* SCArchive::find_code_entry(const methodHandle& method, uint comp_level) {
@@ -265,8 +295,9 @@ SCAFile::SCAFile(const char* archive_path, int fd, uint load_size) {
   _C_load_buffer = nullptr;
   _C_store_buffer = nullptr;
   _store_entries_cnt = 0;
-
+  _for_preload = false;         // changed per stored entry
   _use_meta_ptrs = UseSharedSpaces ? UseMetadataPointers : false;
+  _gen_preload_code = false;
 
   // Read header at the begining of archive
   uint header_size = sizeof(SCAHeader);
@@ -299,6 +330,8 @@ SCAFile::SCAFile(const char* archive_path, int fd, uint load_size) {
     load_strings();
   }
   if (_for_write) {
+    _gen_preload_code = _use_meta_ptrs && StorePreloadCode; 
+
     _C_store_buffer = NEW_C_HEAP_ARRAY(char, ReservedSharedCodeSize + DATA_ALIGNMENT, mtCode);
     _store_buffer = align_up(_C_store_buffer, DATA_ALIGNMENT);
     // Entries allocated at the end of buffer in reverse (as on stack).
@@ -475,17 +508,43 @@ uint SCAFile::write_bytes(const void* buffer, uint nbytes) {
 }
 
 void SCAEntry::print(outputStream* st) const {
-  st->print_cr(" SCA entry [kind: %d, id: " UINT32_FORMAT_X_0 ", offset: %d, size: %d, comp_level: %d, decompiled: %d, %s]", (int)_kind, _id, _offset, _size, _comp_level, _decompile, (_not_entrant? "not_entrant" : "entrant"));
+  st->print_cr(" SCA entry " INTPTR_FORMAT " [kind: %d, id: " UINT32_FORMAT_X_0 ", offset: %d, size: %d, comp_level: %d, comp_id: %d, decompiled: %d, %s%s]", p2i(this), (int)_kind, _id, _offset, _size, _comp_level, _comp_id, _decompile, (_not_entrant? "not_entrant" : "entrant"), (_has_clinit_barriers ? ", has clinit barriers" : (_for_preload ? ", preload ready" : "")));
 }
 
 void* SCAEntry::operator new(size_t x, SCAFile* sca) {
   return (void*)(sca->add_entry());
 }
 
+void SCAFile::preload_code(JavaThread* thread) {
+  assert(_for_read, "sanity");
+  uint count = _load_header->entries_count();
+  if (_load_entries == nullptr) {
+    // Read it
+    _search_entries = (uint*)addr(_load_header->entries_offset()); // [id, index]
+    _load_entries = (SCAEntry*)(_search_entries + 2 * count);
+    log_info(sca, init)("Read %d entries table at offset %d from shared code archive '%s'", count, _load_header->entries_offset(), _archive_path);
+  }
+  uint preload_entries_count = _load_header->preload_entries_count();
+  if (preload_entries_count > 0) {
+    uint* entries_index = (uint*)addr(_load_header->preload_entries_offset());
+    log_info(sca, init)("Load %d preload entries from shared code archive '%s'", preload_entries_count, _archive_path);
+    for (uint i = 0; i < preload_entries_count; i++) {
+      uint index = entries_index[i];
+      SCAEntry* entry = &(_load_entries[index]);
+      Method* m = entry->method();
+      assert(((m != nullptr) && MetaspaceShared::is_in_shared_metaspace((address)m)), "sanity");
+      methodHandle mh(thread, m);
+      mh->set_sca_entry(entry);
+      CompileBroker::compile_method(mh, InvocationEntryBci, CompLevel_full_optimization, methodHandle(), 0, CompileTask::Reason_Preload, thread);
+    }
+  }
+}
+
 static bool check_entry(SCAEntry::Kind kind, uint id, uint comp_level, uint decomp, SCAEntry* entry) {
   if (entry->kind() == kind) {
     assert(entry->id() == id, "sanity");
-    if (kind != SCAEntry::Code || (!entry->not_entrant() && entry->comp_level() == comp_level &&
+    if (kind != SCAEntry::Code || (!entry->not_entrant() && !entry->has_clinit_barriers() &&
+                                  entry->comp_level() == comp_level &&
                                   (comp_level == CompLevel_limited_profile || entry->decompile() == decomp))) {
       return true; // Found
     }
@@ -615,9 +674,12 @@ bool SCAFile::finish_write() {
     uint search_count = code_count * 2;
     uint search_size = search_count * sizeof(uint);
     uint entries_size = code_count * sizeof(SCAEntry); // In bytes
+    uint preload_entries_cnt = 0;
+    uint* preload_entries = NEW_C_HEAP_ARRAY(uint, code_count, mtCode);
+    uint preload_entries_size = code_count * sizeof(uint);
     // _write_position should include headed, code and strings
     uint code_alignment = code_count * DATA_ALIGNMENT; // We align_up code size when storing it.
-    uint total_size = _write_position + _load_size + code_alignment + search_size + align_up(entries_size, DATA_ALIGNMENT);
+    uint total_size = _write_position + _load_size + code_alignment + search_size + preload_entries_size + align_up(entries_size, DATA_ALIGNMENT);
 
     // Create ordered search table for entries [id, index];
     uint* search = NEW_C_HEAP_ARRAY(uint, search_count, mtCode);
@@ -630,12 +692,15 @@ bool SCAFile::finish_write() {
     uint max_size = 0;
     // SCAEntry entries were allocated in reverse in store buffer.
     // Process them in reverse order to cache first code first.
-    for(int i = store_count - 1; i >= 0; i--) {
+    for (int i = store_count - 1; i >= 0; i--) {
       if (entries_address[i].not_entrant()) {
         log_info(sca, exit)("Not entrant new entry i: %d, comp_level: %d, decomp: %d, hash: " UINT32_FORMAT_X_0, i, entries_address[i].comp_level(), entries_address[i].decompile(), entries_address[i].id());
         not_entrant_nb++;
         entries_address[i].set_entrant(); // Reset
-      } //else
+      } else if (entries_address[i].for_preload() && entries_address[i].method() != nullptr) {
+        // record entrant first version code for pre-loading
+        preload_entries[preload_entries_cnt++] = entries_count;
+      }
       {
         uint size = align_up(entries_address[i].size(), DATA_ALIGNMENT);
         if (size > max_size) {
@@ -668,7 +733,10 @@ bool SCAFile::finish_write() {
           log_info(sca, exit)("Not entrant load entry id: %d, decomp: %d, hash: " UINT32_FORMAT_X_0, i, _load_entries[i].decompile(), _load_entries[i].id());
           not_entrant_nb++;
           _load_entries[i].set_entrant(); // Reset
-        } //else
+        } else if (entries_address[i].for_preload() && entries_address[i].method() != nullptr) {
+          // record entrant first version code for pre-loading
+          preload_entries[preload_entries_cnt++] = entries_count;
+        }
         {
           uint size = align_up(_load_entries[i].size(), DATA_ALIGNMENT);
           if (size > max_size) {
@@ -696,6 +764,17 @@ bool SCAFile::finish_write() {
       strings_offset = (current - start); // New offset
       current += strings_size;
     }
+    uint preload_entries_offset = (current - start);
+    preload_entries_size = preload_entries_cnt * sizeof(uint);
+    if (preload_entries_size > 0) {
+      copy_bytes((const char*)preload_entries, (address)current, preload_entries_size);
+      current += preload_entries_size;
+      log_info(sca, exit)("Wrote %d preload entries to shared code archive '%s'", preload_entries_cnt, _archive_path);
+    }
+    if (preload_entries != nullptr) {
+      FREE_C_HEAP_ARRAY(uint, preload_entries);
+    }
+
     uint new_entries_offset = (current - start); // New offset
     // Sort and store search table
     qsort(search, entries_count, 2*sizeof(uint), uint_cmp);
@@ -715,7 +794,9 @@ bool SCAFile::finish_write() {
 
     // Finalize header
     SCAHeader* header = (SCAHeader*)start;
-    header->init(VM_Version::jvm_version(), size, (uint)strings_count, strings_offset, entries_count, new_entries_offset);
+    header->init(VM_Version::jvm_version(), size, (uint)strings_count, strings_offset,
+                 entries_count, new_entries_offset,
+                 preload_entries_cnt, preload_entries_offset);
     if (_use_meta_ptrs) {
       header->set_meta_ptrs();
     }
@@ -920,7 +1001,7 @@ Method* SCAReader::read_method(const methodHandle& comp_method, bool shared) {
       set_lookup_failed();
       log_warning(sca)("Lookup failed for holder %s: not instance klass", k->external_name());
       return nullptr;
-    } else if (!InstanceKlass::cast(k)->is_linked()) {
+    } else if (!InstanceKlass::cast(k)->is_linked() && !_entry->has_clinit_barriers()) {
       set_lookup_failed();
       log_warning(sca)("Lookup failed for holder %s: not linked", k->external_name());
       return nullptr;
@@ -968,7 +1049,7 @@ Method* SCAReader::read_method(const methodHandle& comp_method, bool shared) {
     log_info(sca)("Holder lookup: %s", k->external_name());
   } else {
     set_lookup_failed();
-    log_info(sca)("Lookup failed for holder %s", &(dest[0]));
+    log_warning(sca)("Lookup failed for holder %s", &(dest[0]));
     return nullptr;
   }
   TempNewSymbol name_sym = SymbolTable::probe(&(dest[holder_length + 1]), name_length);
@@ -1002,7 +1083,7 @@ bool SCAFile::write_klass(Klass* klass) {
     return false;
   }
   ResourceMark rm;
-  int not_init = klass->is_instance_klass() && !InstanceKlass::cast(klass)->is_initialized() ? 1 : 0;
+  int not_init = klass->is_instance_klass() && (!InstanceKlass::cast(klass)->is_initialized() || _for_preload) ? 1 : 0;
   if (_use_meta_ptrs && MetaspaceShared::is_in_shared_metaspace((address)klass)) {
     DataKind kind = DataKind::Klass_Shared;
     uint n = write_bytes(&kind, sizeof(int));
@@ -1022,6 +1103,7 @@ bool SCAFile::write_klass(Klass* klass) {
     log_info(sca)("Wrote shared klass: %s%s", klass->external_name(), (!klass->is_instance_klass() ? "" : ((not_init == 0) ? " (initialized)" : " (not-initialized)")));
     return true;
   }
+  _for_preload = false;
   log_info(sca,cds)("Not shared klass: %s", klass->external_name());
   DataKind kind = DataKind::Klass;
   uint n = write_bytes(&kind, sizeof(int));
@@ -1088,6 +1170,7 @@ bool SCAFile::write_method(Method* method) {
     log_info(sca)("Wrote shared method: %s", method->name_and_sig_as_C_string());
     return true;
   }
+  _for_preload = false;
   log_info(sca,cds)("Not shared method: %s", method->name_and_sig_as_C_string());
   DataKind kind = DataKind::Method;
   uint n = write_bytes(&kind, sizeof(int));
@@ -1813,6 +1896,11 @@ jobject SCAReader::read_oop(JavaThread* thread, const methodHandle& comp_method)
       return nullptr;
     }
     obj = k->java_mirror();
+    if (obj == nullptr) {
+      set_lookup_failed();
+      log_warning(sca)("Lookup failed for java_mirror of klass %s", k->external_name());
+      return nullptr;
+    }
   } else if (kind == DataKind::Primitive) {
     code_offset = read_position();
     int t = *(int*)addr(code_offset);
@@ -2159,6 +2247,7 @@ bool SCAFile::load_nmethod(ciEnv* env, ciMethod* target, int entry_bci, Abstract
   TraceTime t1("SC total load time", &_t_totalLoad, CITime, false);
   CompileTask* task = env->task();
   SCAEntry* entry = task->sca_entry();
+  bool preload = task->preload();
   assert(entry != nullptr, "sanity");
   SCAFile* archive = open_for_read();
   if (archive == nullptr) {
@@ -2171,7 +2260,7 @@ bool SCAFile::load_nmethod(ciEnv* env, ciMethod* target, int entry_bci, Abstract
     methodHandle method(THREAD, target->get_Method());
     const char* target_name = method->name_and_sig_as_C_string();
     uint hash = java_lang_String::hash_code((const jbyte*)target_name, strlen(target_name));
-    log_info(sca, nmethod)("Reading nmethod '%s' (comp level: %d, decomp: %d, hash: " UINT32_FORMAT_X_0 ")", target_name, (uint)comp_level, decomp, hash);
+    log_info(sca, nmethod)("%s nmethod '%s' (comp level: %d, decomp: %d, hash: " UINT32_FORMAT_X_0 ")", (preload ? "Preloading" : "Reading"), target_name, (uint)comp_level, decomp, hash);
   }
   ReadingMark rdmk;
   SCAReader reader(archive, entry);
@@ -2304,6 +2393,7 @@ if (UseNewCode3) {
   if (VerifySharedCode) {
     return false;
   }
+
   // Register nmethod
   TraceTime t1("SC total nmethod register time", &_t_totalRegister, CITime, false);
   env->register_method(target, entry_bci,
@@ -2311,18 +2401,25 @@ if (UseNewCode3) {
                        &buffer, frame_size,
                        oop_maps, &handler_table,
                        &nul_chk_table, compiler,
+                       _entry->has_clinit_barriers(),
+                       !_entry->for_preload(),
                        has_unsafe_access,
                        has_wide_vectors,
                        has_monitors,
                        0, NoRTM,
                        (SCAEntry *)_entry);
-  return env->task()->is_success();
+  CompileTask* task = env->task();
+  bool success = task->is_success();
+  if (success && task->preload()) {
+    ((SCAEntry *)_entry)->set_preloaded();
+  }
+  return success;
 }
 
 // No concurency for writing to archive file because this method is called from
 // ciEnv::register_method() under MethodCompileQueue_lock and Compile_lock locks.
 SCAEntry* SCAFile::store_nmethod(const methodHandle& method,
-                     int compile_id,
+                     int comp_id,
                      int entry_bci,
                      CodeOffsets* offsets,
                      int orig_pc_offset,
@@ -2335,6 +2432,8 @@ SCAEntry* SCAFile::store_nmethod(const methodHandle& method,
                      ImplicitExceptionTable* nul_chk_table,
                      AbstractCompiler* compiler,
                      CompLevel comp_level,
+                     bool has_clinit_barriers,
+                     bool for_preload,
                      bool has_unsafe_access,
                      bool has_wide_vectors,
                      bool has_monitors) {
@@ -2357,6 +2456,7 @@ SCAEntry* SCAFile::store_nmethod(const methodHandle& method,
     return nullptr;
   }
   if (buffer->before_expand() != nullptr) {
+    ResourceMark rm;
     log_info(sca, nmethod)("Skip nmethod with expanded buffer '%s'", method->name_and_sig_as_C_string());
     return nullptr;
   }
@@ -2368,6 +2468,12 @@ if (UseNewCode3) {
   buffer->decode();
 }
 #endif
+  assert(!has_clinit_barriers || archive->_gen_preload_code, "sanity");
+  Method* m = method();
+  bool method_in_cds = MetaspaceShared::is_in_shared_metaspace((address)m);
+  assert(!for_preload || method_in_cds, "sanity");
+  archive->_for_preload = for_preload;
+
   if (!archive->align_write()) {
     return nullptr;
   }
@@ -2526,7 +2632,17 @@ if (UseNewCode) {
 
   SCAEntry* entry = new(archive) SCAEntry(entry_position, entry_size, name_offset, name_size,
                                  code_offset, code_size, reloc_offset, reloc_size,
-                                 SCAEntry::Code, hash, (uint)comp_level, decomp);
+                                 SCAEntry::Code, hash, (uint)comp_level, (uint)comp_id, decomp,
+                                 has_clinit_barriers, archive->_for_preload);
+  if (method_in_cds) {
+    entry->set_method(m);
+  }
+#ifdef ASSERT
+  if (has_clinit_barriers || archive->_for_preload) {
+    assert(for_preload, "sanity");
+    assert(entry->method() != nullptr, "sanity");
+  }
+#endif
   {
     ResourceMark rm;
     const char* name   = method->name_and_sig_as_C_string();

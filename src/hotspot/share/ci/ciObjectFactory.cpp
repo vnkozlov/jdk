@@ -284,7 +284,7 @@ ciMetadata* ciObjectFactory::cached_metadata(Metadata* key) {
 // Get the ciMetadata corresponding to some Metadata. If the ciMetadata has
 // already been created, it is returned. Otherwise, a new ciMetadata
 // is created.
-ciMetadata* ciObjectFactory::get_metadata(Metadata* key) {
+ciMetadata* ciObjectFactory::get_metadata(Metadata* key, bool preload) {
   ASSERT_IN_VM;
 
   if (ReplayCompiles && key->is_klass()) {
@@ -321,7 +321,7 @@ ciMetadata* ciObjectFactory::get_metadata(Metadata* key) {
   if (!found) {
     // The ciMetadata does not yet exist. Create it and insert it
     // into the cache.
-    ciMetadata* new_object = create_new_metadata(key);
+    ciMetadata* new_object = create_new_metadata(key, preload);
     init_ident_of(new_object);
     assert(new_object->is_metadata(), "must be");
 
@@ -379,14 +379,14 @@ ciObject* ciObjectFactory::create_new_object(oop o) {
 //
 // Implementation note: in order to keep Metadata live, an auxiliary ciObject
 // is used, which points to it's holder.
-ciMetadata* ciObjectFactory::create_new_metadata(Metadata* o) {
+ciMetadata* ciObjectFactory::create_new_metadata(Metadata* o, bool preload) {
   EXCEPTION_CONTEXT;
 
   if (o->is_klass()) {
     Klass* k = (Klass*)o;
     if (k->is_instance_klass()) {
       assert(!ReplayCompiles || ciReplay::no_replay_state() || !ciReplay::is_klass_unresolved((InstanceKlass*)k), "must be whitelisted for replay compilation");
-      return new (arena()) ciInstanceKlass(k);
+      return new (arena()) ciInstanceKlass(k, preload);
     } else if (k->is_objArray_klass()) {
       return new (arena()) ciObjArrayKlass(k);
     } else if (k->is_typeArray_klass()) {
@@ -395,7 +395,7 @@ ciMetadata* ciObjectFactory::create_new_metadata(Metadata* o) {
   } else if (o->is_method()) {
     methodHandle h_m(THREAD, (Method*)o);
     ciEnv *env = CURRENT_THREAD_ENV;
-    ciInstanceKlass* holder = env->get_instance_klass(h_m()->method_holder());
+    ciInstanceKlass* holder = env->get_instance_klass(h_m()->method_holder(), preload);
     return new (arena()) ciMethod(h_m, holder);
   } else if (o->is_methodData()) {
     // Hold methodHandle alive - might not be necessary ???

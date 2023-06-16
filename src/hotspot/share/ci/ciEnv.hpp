@@ -187,11 +187,11 @@ private:
     }
   }
 
-  ciMetadata* get_metadata(Metadata* o) {
+  ciMetadata* get_metadata(Metadata* o, bool preload = false) {
     if (o == nullptr) {
       return nullptr;
     } else {
-      return _factory->get_metadata(o);
+      return _factory->get_metadata(o, preload);
     }
   }
 
@@ -215,9 +215,9 @@ private:
     if (o == nullptr) return nullptr;
     return get_metadata(o)->as_klass();
   }
-  ciInstanceKlass* get_instance_klass(Klass* o) {
+  ciInstanceKlass* get_instance_klass(Klass* o, bool preload = false) {
     if (o == nullptr) return nullptr;
-    return get_metadata(o)->as_instance_klass();
+    return get_metadata(o, preload)->as_instance_klass();
   }
   ciMethod* get_method(Method* o) {
     if (o == nullptr) return nullptr;
@@ -228,7 +228,7 @@ private:
     return get_metadata(o)->as_method_data();
   }
 
-  ciMethod* get_method_from_handle(Method* method);
+  ciMethod* get_method_from_handle(Method* method, bool preload = false);
 
   ciInstance* get_or_create_exception(jobject& handle, Symbol* name);
 
@@ -380,6 +380,8 @@ public:
                        ExceptionHandlerTable*    handler_table,
                        ImplicitExceptionTable*   inc_table,
                        AbstractCompiler*         compiler,
+                       bool                      has_clinit_barriers,
+                       bool                      for_preload,
                        bool                      has_unsafe_access,
                        bool                      has_wide_vectors,
                        bool                      has_monitors,
