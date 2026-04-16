@@ -4359,7 +4359,7 @@ static void print_helper(outputStream* st, const char* name, int count) {
     st->print(" %s=%d", name, count);
   }
 }
- 
+
 void AOTCodeCache::print_statistics_on(outputStream* st) {
   AOTCodeCache* cache = open_for_use();
   if (cache != nullptr) {
