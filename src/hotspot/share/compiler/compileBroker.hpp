@@ -187,13 +187,13 @@ class CompileBroker: AllStatic {
   static AbstractCompiler* _compilers[2];
 
   // The maximum numbers of compiler threads to be determined during startup.
-  static int _c1_count, _c2_count;
+  static int _c1_count, _c2_count, _ac_count;
 
   // An array of compiler thread Java objects
-  static jobject *_compiler1_objects, *_compiler2_objects;
+  static jobject *_compiler1_objects, *_compiler2_objects, *_ac_objects;
 
   // An array of compiler logs
-  static CompileLog **_compiler1_logs, **_compiler2_logs;
+  static CompileLog **_compiler1_logs, **_compiler2_logs, **_ac_logs;
 
   // These counters are used for assigning id's to each compilation
   static volatile jint _compilation_id;
@@ -202,6 +202,8 @@ class CompileBroker: AllStatic {
 
   static CompileQueue* _c2_compile_queue;
   static CompileQueue* _c1_compile_queue;
+  static CompileQueue* _ac1_compile_queue;
+  static CompileQueue* _ac2_compile_queue;
 
   // performance counters
   static PerfCounter* _perf_total_compilation;
@@ -237,6 +239,7 @@ class CompileBroker: AllStatic {
   static uint _total_compile_count;
   static uint _total_bailout_count;
   static uint _total_invalidated_count;
+  static uint _total_not_entrant_count;
   static uint _total_native_compile_count;
   static uint _total_osr_compile_count;
   static uint _total_standard_compile_count;
@@ -249,6 +252,8 @@ class CompileBroker: AllStatic {
   static jlong _peak_compilation_time;
 
   static CompilerStatistics _stats_per_level[];
+  static CompilerStatistics _aot_stats;
+  static CompilerStatistics _aot_stats_per_level[];
 
   static volatile int _print_compilation_warning;
 
@@ -258,6 +263,7 @@ class CompileBroker: AllStatic {
     training_replay_t
   };
 
+  static Handle create_thread_oop(const char* name, TRAPS);
   static JavaThread* make_thread(ThreadType type, jobject thread_oop, CompileQueue* queue, AbstractCompiler* comp, JavaThread* THREAD);
   static void init_compiler_threads();
   static void init_training_replay();
@@ -270,12 +276,18 @@ class CompileBroker: AllStatic {
                                           int                 osr_bci,
                                           int                 comp_level,
                                           int                 hot_count,
+                                          AOTCodeEntry*       aot_code_entry,
                                           CompileTask::CompileReason compile_reason,
+                                          bool                requires_online_compilation,
                                           bool                blocking);
   static void wait_for_completion(CompileTask* task);
 #if INCLUDE_JVMCI
   static bool wait_for_jvmci_completion(JVMCICompiler* comp, CompileTask* task, JavaThread* thread);
 #endif
+public:
+  static void wait_for_no_active_tasks();
+
+private:
 
   static void free_buffer_blob_if_allocated(CompilerThread* thread);
 
@@ -287,16 +299,21 @@ class CompileBroker: AllStatic {
   static void collect_statistics(CompilerThread* thread, elapsedTimer time, CompileTask* task);
 
   static void compile_method_base(const methodHandle& method,
+                                  AOTCodeEntry* aot_code_entry,
                                   int osr_bci,
                                   int comp_level,
                                   int hot_count,
                                   CompileTask::CompileReason compile_reason,
+                                  bool requires_online_compilation,
                                   bool blocking,
                                   Thread* thread);
 
-  static CompileQueue* compile_queue(int comp_level);
+  static CompileQueue* compile_queue(int comp_level, bool is_aot);
   static bool init_compiler_runtime();
   static void shutdown_compiler_runtime(AbstractCompiler* comp, CompilerThread* thread);
+
+  static AOTCodeEntry* find_aot_code_entry(const methodHandle& method, int osr_bci, int comp_level,
+                                           CompileTask::CompileReason compile_reason);
 
 public:
   enum {
@@ -310,11 +327,13 @@ public:
     return nullptr;
   }
 
-  static bool compilation_is_complete(const methodHandle& method, int osr_bci, int comp_level);
+  static bool initialized() { return _initialized; }
+  static bool compilation_is_complete(const methodHandle& method, int osr_bci, int comp_level, bool online_only,
+                                      CompileTask::CompileReason compile_reason);
   static bool compilation_is_in_queue(const methodHandle& method);
   static void print_compile_queues(outputStream* st);
-  static int queue_size(int comp_level) {
-    CompileQueue *q = compile_queue(comp_level);
+  static int queue_size(int comp_level, bool is_aot = false) {
+    CompileQueue *q = compile_queue(comp_level, is_aot);
     return q != nullptr ? q->size() : 0;
   }
   static void compilation_init(JavaThread* THREAD);
@@ -323,7 +342,11 @@ public:
                                  int osr_bci,
                                  int comp_level,
                                  int hot_count,
+                                 bool requires_online_compilation,
                                  CompileTask::CompileReason compile_reason,
+                                 TRAPS);
+  static void preload_aot_method(const methodHandle& method,
+                                 AOTCodeEntry* aot_code_entry,
                                  TRAPS);
   static CompileQueue* c1_compile_queue();
   static CompileQueue* c2_compile_queue();
@@ -333,6 +356,7 @@ private:
                                    int osr_bci,
                                    int comp_level,
                                    int hot_count,
+                                   bool requires_online_compilation,
                                    CompileTask::CompileReason compile_reason,
                                    DirectiveSet* directive,
                                    TRAPS);
@@ -384,8 +408,6 @@ public:
     return AtomicAccess::load(&_should_compile_new_jobs) == shutdown_compilation;
   }
 
-  static void wait_for_no_active_tasks();
-
   static void handle_full_code_cache(CodeBlobType code_blob_type);
   // Ensures that warning is only printed once.
   static bool should_print_compiler_warning() {
@@ -420,6 +442,12 @@ public:
     return _compiler2_objects[idx];
   }
 
+  static jobject ac_object(int idx) {
+    assert(_ac_objects != nullptr, "must be initialized");
+    assert(idx < _ac_count, "oob");
+    return _ac_objects[idx];
+  }
+
   static AbstractCompiler* compiler1() { return _compilers[0]; }
   static AbstractCompiler* compiler2() { return _compilers[1]; }
 
@@ -444,8 +472,12 @@ public:
   static jlong get_peak_compilation_time() {        return _peak_compilation_time; }
   static jlong get_total_compilation_time() {       return _t_total_compilation.milliseconds(); }
 
+  static void log_not_entrant(nmethod* nm);
+
   // Log that compilation profiling is skipped because metaspace is full.
   static void log_metaspace_failure();
+
+  static void print_statistics_on(outputStream* st);
 
   // CodeHeap State Analytics.
   static void print_info(outputStream *out);

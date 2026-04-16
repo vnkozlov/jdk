@@ -72,7 +72,10 @@ public class AOTCodeCPUFeatureIncompatibilityTest {
             @Override
             public String[] vmArgs(RunMode runMode) {
                 if (runMode == RunMode.PRODUCTION) {
-                    return new String[] {vmOption, "-Xlog:aot+codecache*=debug"};
+                    return new String[] {vmOption,
+                                         "-XX:+UnlockDiagnosticVMOptions",
+                                         "-XX:-AbortVMOnAOTCodeFailure",
+                                         "-Xlog:aot+codecache*=debug"};
                 } else {
                     return new String[] {"-Xlog:aot+codecache*=debug"};
                 }

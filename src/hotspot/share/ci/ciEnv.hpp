@@ -34,11 +34,14 @@
 #include "compiler/cHeapStringHolder.hpp"
 #include "compiler/compiler_globals.hpp"
 #include "compiler/compilerThread.hpp"
+#include "oops/methodCounters.hpp"
 #include "oops/methodData.hpp"
 #include "runtime/javaThread.hpp"
 
 class CompileTask;
 class OopMapSet;
+class AOTCodeEntry;
+class AOTCodeReader;
 
 // ciEnv
 //
@@ -223,6 +226,10 @@ private:
     if (o == nullptr) return nullptr;
     return get_metadata(o)->as_method_data();
   }
+  ciMetadata* get_method_counters(MethodCounters* o) {
+    if (o == nullptr) return nullptr;
+    return get_metadata((Metadata*)o);
+  }
 
   ciMethod* get_method_from_handle(Method* method);
 
@@ -291,6 +298,12 @@ private:
   // Helper routine for determining the validity of a compilation with
   // respect to method dependencies (e.g. concurrent class loading).
   void validate_compile_task_dependencies(ciMethod* target);
+
+  // Helper rountimes to factor out common code used by routines that register a method
+  // i.e. register_aot_method() and register_method()
+  bool is_compilation_valid(JavaThread* thread, ciMethod* target, bool install_code, bool is_loading_aot_code, bool preload);
+  void make_code_usable(JavaThread* thread, ciMethod* target, bool preload, int entry_bci, AOTCodeEntry* aot_code_entry, nmethod* nm);
+
 public:
   enum {
     MethodCompilable,
@@ -363,6 +376,14 @@ public:
   int comp_level();   // task()->comp_level()
   int compile_id();  // task()->compile_id()
 
+#if INCLUDE_CDS
+  // Register method loaded from AOT code cache
+  nmethod* register_aot_method(JavaThread* thread,
+                               ciMethod* target,
+                               AbstractCompiler* compiler,
+                               nmethod* archived_nm,
+                               AOTCodeReader* aot_code_reader);
+#endif
   // Register the result of a compilation.
   void register_method(ciMethod*                 target,
                        int                       entry_bci,
@@ -374,11 +395,14 @@ public:
                        ExceptionHandlerTable*    handler_table,
                        ImplicitExceptionTable*   inc_table,
                        AbstractCompiler*         compiler,
+                       bool                      has_clinit_barriers,
+                       bool                      for_preload,
                        bool                      has_unsafe_access,
                        bool                      has_wide_vectors,
                        bool                      has_monitors,
                        bool                      has_scoped_access,
-                       int                       immediate_oops_patched);
+                       int                       immediate_oops_patched,
+                       bool                      install_code);
 
   // Access to certain well known ciObjects.
 #define VM_CLASS_FUNC(name, ignore_s) \
@@ -512,6 +536,9 @@ public:
   void process_invokedynamic(const constantPoolHandle &cp, int index, JavaThread* thread);
   void process_invokehandle(const constantPoolHandle &cp, int index, JavaThread* thread);
   void find_dynamic_call_sites();
+
+  bool is_aot_compile() NOT_CDS_RETURN_(false);
+  CDS_ONLY( InstanceKlass::ClassState compute_init_state_for_aot_compile(InstanceKlass* ik); )
 };
 
 #endif // SHARE_CI_CIENV_HPP

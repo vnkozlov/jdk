@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2023, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -36,20 +36,85 @@
 #include "memory/virtualspace.hpp"
 #include "oops/instanceKlass.hpp"
 
+size_t _aot_code_region_size = 0;
+
+bool AOTCacheAccess::can_generate_aot_code(address addr) {
+  assert(CDSConfig::is_dumping_final_static_archive(), "must be");
+  return ArchiveBuilder::is_active() && ArchiveBuilder::current()->has_been_archived(addr);
+}
+
+bool AOTCacheAccess::can_generate_aot_code_for(InstanceKlass* ik) {
+  assert(CDSConfig::is_dumping_final_static_archive(), "must be");
+  if (!ArchiveBuilder::is_active()) {
+    return false;
+  }
+  ArchiveBuilder* builder = ArchiveBuilder::current();
+  if (!builder->has_been_archived((address)ik)) {
+    return false;
+  }
+  if (ik->defined_by_other_loaders()) {
+    return false;
+  }
+  return true;
+}
+
+uint AOTCacheAccess::delta_from_base_address(address addr) {
+  assert(CDSConfig::is_dumping_final_static_archive(), "must be");
+  assert(ArchiveBuilder::is_active(), "must be");
+  ArchiveBuilder* builder = ArchiveBuilder::current();
+  address requested_addr = builder->to_requested(builder->get_buffered_addr(addr));
+  return (uint)pointer_delta(requested_addr, (address)AOTMetaspace::requested_base_address(), 1);
+}
+
+uint AOTCacheAccess::convert_method_to_offset(Method* method) {
+  assert(CDSConfig::is_using_archive() && !CDSConfig::is_dumping_final_static_archive(), "must be");
+  assert(AOTMetaspace::in_aot_cache(method), "method %p is not in AOTCache", method);
+  uint offset = (uint)pointer_delta((address)method, (address)SharedBaseAddress, 1);
+  return offset;
+}
+
+#if INCLUDE_CDS_JAVA_HEAP
+int AOTCacheAccess::get_archived_object_permanent_index(oop obj) {
+  return HeapShared::get_root_index(obj); // -1 if obj is not a root.
+}
+
+oop AOTCacheAccess::get_archived_object(int permanent_index) {
+  oop o = HeapShared::get_root(permanent_index);
+  assert(oopDesc::is_oop_or_null(o), "sanity");
+  return o;
+}
+
+#endif // INCLUDE_CDS_JAVA_HEAP
+
 void* AOTCacheAccess::allocate_aot_code_region(size_t size) {
   assert(CDSConfig::is_dumping_final_static_archive(), "must be");
   return (void*)ArchiveBuilder::ac_region_alloc(size);
 }
 
 size_t AOTCacheAccess::get_aot_code_region_size() {
-  assert(CDSConfig::is_using_archive(), "must be");
-  FileMapInfo* mapinfo = FileMapInfo::current_info();
-  assert(mapinfo != nullptr, "must be");
-  return mapinfo->region_at(AOTMetaspace::ac)->used_aligned();
+  return _aot_code_region_size;
+}
+
+void AOTCacheAccess::set_aot_code_region_size(size_t sz) {
+  _aot_code_region_size = sz;
 }
 
 bool AOTCacheAccess::map_aot_code_region(ReservedSpace rs) {
   FileMapInfo* static_mapinfo = FileMapInfo::current_info();
   assert(UseSharedSpaces && static_mapinfo != nullptr, "must be");
   return static_mapinfo->map_aot_code_region(rs);
+}
+
+bool AOTCacheAccess::is_aot_code_region_empty() {
+  assert(CDSConfig::is_dumping_final_static_archive(), "must be");
+  return ArchiveBuilder::current()->ac_region()->is_empty();
+}
+
+void AOTCacheAccess::set_pointer(address* ptr, address value) {
+  ArchiveBuilder* builder = ArchiveBuilder::current();
+  if (value != nullptr && !builder->is_in_buffer_space(value)) {
+    value = builder->get_buffered_addr(value);
+  }
+  *ptr = value;
+  ArchivePtrMarker::mark_pointer(ptr);
 }

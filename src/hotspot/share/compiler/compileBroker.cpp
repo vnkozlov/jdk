@@ -27,6 +27,7 @@
 #include "classfile/symbolTable.hpp"
 #include "classfile/vmClasses.hpp"
 #include "classfile/vmSymbols.hpp"
+#include "code/aotCodeCache.hpp"
 #include "code/codeCache.hpp"
 #include "code/codeHeapState.hpp"
 #include "code/dependencyContext.hpp"
@@ -67,7 +68,7 @@
 #include "runtime/safepointVerifiers.hpp"
 #include "runtime/sharedRuntime.hpp"
 #include "runtime/threads.hpp"
-#include "runtime/threadSMR.hpp"
+#include "runtime/threadSMR.inline.hpp"
 #include "runtime/timerTrace.hpp"
 #include "runtime/vframe.inline.hpp"
 #include "utilities/debug.hpp"
@@ -132,13 +133,16 @@ AbstractCompiler* CompileBroker::_compilers[2];
 // The maximum numbers of compiler threads to be determined during startup.
 int CompileBroker::_c1_count = 0;
 int CompileBroker::_c2_count = 0;
+int CompileBroker::_ac_count = 0;
 
 // An array of compiler names as Java String objects
 jobject* CompileBroker::_compiler1_objects = nullptr;
 jobject* CompileBroker::_compiler2_objects = nullptr;
+jobject* CompileBroker::_ac_objects = nullptr;
 
 CompileLog** CompileBroker::_compiler1_logs = nullptr;
 CompileLog** CompileBroker::_compiler2_logs = nullptr;
+CompileLog** CompileBroker::_ac_logs = nullptr;
 
 // These counters are used to assign an unique ID to each compilation.
 volatile jint CompileBroker::_compilation_id     = 0;
@@ -178,6 +182,7 @@ elapsedTimer CompileBroker::_t_bailedout_compilation;
 
 uint CompileBroker::_total_bailout_count            = 0;
 uint CompileBroker::_total_invalidated_count        = 0;
+uint CompileBroker::_total_not_entrant_count        = 0;
 uint CompileBroker::_total_compile_count            = 0;
 uint CompileBroker::_total_osr_compile_count        = 0;
 uint CompileBroker::_total_standard_compile_count   = 0;
@@ -192,9 +197,13 @@ uint CompileBroker::_sum_nmethod_code_size          = 0;
 jlong CompileBroker::_peak_compilation_time        = 0;
 
 CompilerStatistics CompileBroker::_stats_per_level[CompLevel_full_optimization];
+CompilerStatistics CompileBroker::_aot_stats;
+CompilerStatistics CompileBroker::_aot_stats_per_level[CompLevel_full_optimization + 1];
 
 CompileQueue* CompileBroker::_c2_compile_queue     = nullptr;
 CompileQueue* CompileBroker::_c1_compile_queue     = nullptr;
+CompileQueue* CompileBroker::_ac1_compile_queue    = nullptr;
+CompileQueue* CompileBroker::_ac2_compile_queue    = nullptr;
 
 bool compileBroker_init() {
   if (LogEvents) {
@@ -344,6 +353,8 @@ void CompileQueue::add(CompileTask* task) {
 
   // Mark the method as being in the compile queue.
   task->method()->set_queued_for_compilation();
+
+  task->mark_queued(os::elapsed_counter());
 
   if (CIPrintCompileQueue) {
     print_tty();
@@ -530,17 +541,15 @@ void CompileQueue::remove_and_mark_stale(CompileTask* task) {
 // methods in the compile queue need to be marked as used on the stack
 // so that they don't get reclaimed by Redefine Classes
 void CompileQueue::mark_on_stack() {
-  CompileTask* task = _first;
-  while (task != nullptr) {
+  for (CompileTask* task = _first; task != nullptr; task = task->next()) {
     task->mark_on_stack();
-    task = task->next();
   }
 }
 
 
-CompileQueue* CompileBroker::compile_queue(int comp_level) {
-  if (is_c2_compile(comp_level)) return _c2_compile_queue;
-  if (is_c1_compile(comp_level)) return _c1_compile_queue;
+CompileQueue* CompileBroker::compile_queue(int comp_level, bool is_aot) {
+  if (is_c2_compile(comp_level)) return ((is_aot && (_ac_count > 0)) ? _ac2_compile_queue : _c2_compile_queue);
+  if (is_c1_compile(comp_level)) return ((is_aot && (_ac_count > 0)) ? _ac1_compile_queue : _c1_compile_queue);
   return nullptr;
 }
 
@@ -565,6 +574,12 @@ void CompileBroker::print_compile_queues(outputStream* st) {
   }
   if (_c2_compile_queue != nullptr) {
     _c2_compile_queue->print(st);
+  }
+  if (_ac1_compile_queue != nullptr) {
+    _ac1_compile_queue->print(st);
+  }
+  if (_ac2_compile_queue != nullptr) {
+    _ac2_compile_queue->print(st);
   }
 }
 
@@ -636,6 +651,7 @@ void CompileBroker::compilation_init(JavaThread* THREAD) {
   // Set the interface to the current compiler(s).
   _c1_count = CompilationPolicy::c1_count();
   _c2_count = CompilationPolicy::c2_count();
+  _ac_count = CompilationPolicy::ac_count();
 
 #if INCLUDE_JVMCI
   if (EnableJVMCI) {
@@ -792,7 +808,13 @@ void CompileBroker::compilation_init(JavaThread* THREAD) {
                                           CHECK);
   }
 
+  log_info(aot, codecache, init)("CompileBroker is initialized");
   _initialized = true;
+}
+
+Handle CompileBroker::create_thread_oop(const char* name, TRAPS) {
+  Handle thread_oop = JavaThread::create_system_thread_object(name, CHECK_NH);
+  return thread_oop;
 }
 
 void TrainingReplayThread::training_replay_thread_entry(JavaThread* thread, TRAPS) {
@@ -958,6 +980,17 @@ static void print_compiler_threads(stringStream& msg) {
   }
 }
 
+static void print_compiler_thread(JavaThread *ct) {
+  if (trace_compiler_threads()) {
+    ResourceMark rm;
+    ThreadsListHandle tlh;  // name() depends on the TLH.
+    assert(tlh.includes(ct), "ct=" INTPTR_FORMAT " exited unexpectedly.", p2i(ct));
+    stringStream msg;
+    msg.print("Added initial compiler thread %s", ct->name());
+    print_compiler_threads(msg);
+  }
+}
+
 void CompileBroker::init_compiler_threads() {
   // Ensure any exceptions lead to vm_exit_during_initialization.
   EXCEPTION_MARK;
@@ -977,6 +1010,18 @@ void CompileBroker::init_compiler_threads() {
     _compiler1_logs = NEW_C_HEAP_ARRAY(CompileLog*, _c1_count, mtCompiler);
   }
 
+  if (_ac_count > 0) {
+    if (_c1_count > 0) { // C1 is present
+      _ac1_compile_queue  = new CompileQueue("C1 AOT code compile queue");
+    }
+    if (_c2_count > 0) { // C2 is present
+      _ac2_compile_queue  = new CompileQueue("C2 AOT code compile queue");
+    }
+    _ac_objects = NEW_C_HEAP_ARRAY(jobject, _ac_count, mtCompiler);
+    _ac_logs = NEW_C_HEAP_ARRAY(CompileLog*, _ac_count, mtCompiler);
+  }
+  char name_buffer[256];
+
   for (int i = 0; i < _c2_count; i++) {
     // Create a name for our thread.
     jobject thread_handle = create_compiler_thread(_compilers[1], i, CHECK);
@@ -987,14 +1032,7 @@ void CompileBroker::init_compiler_threads() {
       JavaThread *ct = make_thread(compiler_t, thread_handle, _c2_compile_queue, _compilers[1], THREAD);
       assert(ct != nullptr, "should have been handled for initial thread");
       _compilers[1]->set_num_compiler_threads(i + 1);
-      if (trace_compiler_threads()) {
-        ResourceMark rm;
-        ThreadsListHandle tlh;  // name() depends on the TLH.
-        assert(tlh.includes(ct), "ct=" INTPTR_FORMAT " exited unexpectedly.", p2i(ct));
-        stringStream msg;
-        msg.print("Added initial compiler thread %s", ct->name());
-        print_compiler_threads(msg);
-      }
+      print_compiler_thread(ct);
     }
   }
 
@@ -1008,14 +1046,34 @@ void CompileBroker::init_compiler_threads() {
       JavaThread *ct = make_thread(compiler_t, thread_handle, _c1_compile_queue, _compilers[0], THREAD);
       assert(ct != nullptr, "should have been handled for initial thread");
       _compilers[0]->set_num_compiler_threads(i + 1);
-      if (trace_compiler_threads()) {
-        ResourceMark rm;
-        ThreadsListHandle tlh;  // name() depends on the TLH.
-        assert(tlh.includes(ct), "ct=" INTPTR_FORMAT " exited unexpectedly.", p2i(ct));
-        stringStream msg;
-        msg.print("Added initial compiler thread %s", ct->name());
-        print_compiler_threads(msg);
-      }
+      print_compiler_thread(ct);
+    }
+  }
+
+  if (_ac_count > 0) {
+    int i = 0;
+    if (_c1_count > 0) { // C1 is present
+      os::snprintf_checked(name_buffer, sizeof(name_buffer), "C%d AOT code caching CompilerThread", 1);
+      Handle thread_oop = create_thread_oop(name_buffer, CHECK);
+      jobject thread_handle = JNIHandles::make_global(thread_oop);
+      _ac_objects[i] = thread_handle;
+      _ac_logs[i] = nullptr;
+      i++;
+
+      JavaThread *ct = make_thread(compiler_t, thread_handle, _ac1_compile_queue, _compilers[0], THREAD);
+      assert(ct != nullptr, "should have been handled for initial thread");
+      print_compiler_thread(ct);
+    }
+    if (_c2_count > 0) { // C2 is present
+      os::snprintf_checked(name_buffer, sizeof(name_buffer), "C%d AOT code caching CompilerThread", 2);
+      Handle thread_oop = create_thread_oop(name_buffer, CHECK);
+      jobject thread_handle = JNIHandles::make_global(thread_oop);
+      _ac_objects[i] = thread_handle;
+      _ac_logs[i] = nullptr;
+
+      JavaThread *ct = make_thread(compiler_t, thread_handle, _ac2_compile_queue, _compilers[1], THREAD);
+      assert(ct != nullptr, "should have been handled for initial thread");
+      print_compiler_thread(ct);
     }
   }
 
@@ -1176,6 +1234,12 @@ void CompileBroker::mark_on_stack() {
   if (_c1_compile_queue != nullptr) {
     _c1_compile_queue->mark_on_stack();
   }
+  if (_ac1_compile_queue != nullptr) {
+    _ac1_compile_queue->mark_on_stack();
+  }
+  if (_ac2_compile_queue != nullptr) {
+    _ac2_compile_queue->mark_on_stack();
+  }
 }
 
 // ------------------------------------------------------------------
@@ -1183,17 +1247,20 @@ void CompileBroker::mark_on_stack() {
 //
 // Request compilation of a method.
 void CompileBroker::compile_method_base(const methodHandle& method,
+                                        AOTCodeEntry* aot_code_entry,
                                         int osr_bci,
                                         int comp_level,
                                         int hot_count,
                                         CompileTask::CompileReason compile_reason,
+                                        bool requires_online_compilation,
                                         bool blocking,
                                         Thread* thread) {
   guarantee(!method->is_abstract(), "cannot compile abstract methods");
   assert(method->method_holder()->is_instance_klass(),
          "sanity check");
-  assert(!method->method_holder()->is_not_initialized(),
-         "method holder must be initialized");
+  assert(!method->method_holder()->is_not_initialized()   ||
+         compile_reason == CompileTask::Reason_Preload    ||
+         CompileTask::reason_is_aot_compile(compile_reason), "method holder must be initialized");
   assert(!method->is_method_handle_intrinsic(), "do not enqueue these guys");
 
   if (CIPrintRequests) {
@@ -1208,11 +1275,29 @@ void CompileBroker::compile_method_base(const methodHandle& method,
     }
     tty->cr();
   }
-
+  LogStreamHandle(Debug, aot, codecache, compilation) log;
+  if (log.is_enabled()) {
+    ResourceMark rm;
+    MethodTrainingData* mtd = MethodTrainingData::have_data() ? MethodTrainingData::find_fast(method) : nullptr;
+    MethodCounters* mc = method->method_counters();
+    const char* name = method->name_and_sig_as_C_string();
+    const char* aotn = (compile_reason == CompileTask::Reason_Preload) ? "AP" :
+                       (!requires_online_compilation ? " A" : "  ");
+    const char* osrn = (osr_bci != InvocationEntryBci) ? "% " : "";
+    log.print("request: %s%d %16s %s%s", aotn, comp_level, CompileTask::reason_name(compile_reason), osrn, name);
+    if (mtd != nullptr) {
+      log.print(" (MTD invoke: %d, backedge: %d)", mtd->invocation_count(), mtd->backedge_count());
+    }
+    if (mc != nullptr) {
+      log.print(" (MC invoke: %d, backedge: %d)", mc->invocation_counter()->count(),
+                   mc->backedge_counter()->count());
+    }
+    log.cr();
+  }
   // A request has been made for compilation.  Before we do any
   // real work, check to see if the method has been compiled
   // in the meantime with a definitive result.
-  if (compilation_is_complete(method, osr_bci, comp_level)) {
+  if (compilation_is_complete(method, osr_bci, comp_level, requires_online_compilation, compile_reason)) {
     return;
   }
 
@@ -1243,9 +1328,16 @@ void CompileBroker::compile_method_base(const methodHandle& method,
   // the queue. Create if we don't have them yet.
   method->get_method_counters(thread);
 
+  precond(compile_reason != CompileTask::Reason_Preload || aot_code_entry != nullptr);
+  if (!requires_online_compilation && aot_code_entry == nullptr) {
+    aot_code_entry = find_aot_code_entry(method, osr_bci, comp_level, compile_reason);
+  }
+  bool is_aot = (aot_code_entry != nullptr);
+  requires_online_compilation = !is_aot; // Request JIT compilation
+
   // Outputs from the following MutexLocker block:
-  CompileTask* task     = nullptr;
-  CompileQueue* queue  = compile_queue(comp_level);
+  CompileTask* task = nullptr;
+  CompileQueue* queue = compile_queue(comp_level, is_aot);
 
   // Acquire our lock.
   {
@@ -1261,7 +1353,7 @@ void CompileBroker::compile_method_base(const methodHandle& method,
     // We need to check again to see if the compilation has
     // completed.  A previous compilation may have registered
     // some result.
-    if (compilation_is_complete(method, osr_bci, comp_level)) {
+    if (compilation_is_complete(method, osr_bci, comp_level, requires_online_compilation, compile_reason)) {
       return;
     }
 
@@ -1351,8 +1443,8 @@ void CompileBroker::compile_method_base(const methodHandle& method,
     task = create_compile_task(queue,
                                compile_id, method,
                                osr_bci, comp_level,
-                               hot_count, compile_reason,
-                               blocking);
+                               hot_count, aot_code_entry, compile_reason,
+                               requires_online_compilation, blocking);
   }
 
   if (blocking) {
@@ -1360,9 +1452,67 @@ void CompileBroker::compile_method_base(const methodHandle& method,
   }
 }
 
+AOTCodeEntry* CompileBroker::find_aot_code_entry(const methodHandle& method, int osr_bci, int comp_level,
+                                                 CompileTask::CompileReason compile_reason) {
+  if (compile_reason == CompileTask::Reason_Whitebox) {
+    return nullptr; // Need normal JIT compilation
+  }
+  AOTCodeEntry* aot_code_entry = nullptr;
+  if (osr_bci == InvocationEntryBci && AOTCodeCache::is_using_code()) {
+    // Check for AOT preload code first.
+    precond(compile_reason != CompileTask::Reason_Preload); // should call it for AOT code preload.
+    aot_code_entry = AOTCodeCache::find_code_entry(method, comp_level);
+  }
+  return aot_code_entry;
+}
+
+void CompileBroker::preload_aot_method(const methodHandle& method, AOTCodeEntry* aot_code_entry, TRAPS) {
+  // Don't need most of the checks for AOT code preloading.
+  precond(_initialized);
+  precond(aot_code_entry != nullptr && aot_code_entry->for_preload());
+  // If the compiler is shut off due to code cache getting full
+  // fail out now so blocking compiles dont hang the java thread
+  if (should_compile_new_jobs()) {
+    int osr_bci = InvocationEntryBci;
+    int comp_level = CompLevel_full_optimization;
+    int hot_count  = 0;
+    CompileTask::CompileReason compile_reason = CompileTask::Reason_Preload;
+    bool requires_online_compilation = false;
+
+    AbstractCompiler *comp = CompileBroker::compiler(comp_level);
+    assert(comp != nullptr, "Ensure we have a compiler");
+
+    nmethod* method_code = method->code();
+    if (method_code != nullptr) {
+      if (compilation_is_complete(method, osr_bci, comp_level, requires_online_compilation, compile_reason)) {
+        return;
+      }
+    }
+    if (method->is_not_compilable(comp_level)) {
+      return;
+    }
+
+    // JVMTI -- post_compile_event requires jmethod_id() that may require
+    // a lock the compiling thread can not acquire. Prefetch it here.
+    if (JvmtiExport::should_post_compiled_method_load()) {
+      method->jmethod_id();
+    }
+
+    DirectiveSet* directive = DirectivesStack::getMatchingDirective(method, comp);
+    bool is_blocking = ReplayCompiles                                             ||
+                       !directive->BackgroundCompilationOption                    ||
+                       (PreloadBlocking && (compile_reason == CompileTask::Reason_Preload));
+    // CompileBroker::compile_method can trap and can have pending async exception.
+    compile_method_base(method, aot_code_entry, osr_bci, comp_level, hot_count, compile_reason,
+                        requires_online_compilation, is_blocking, THREAD);
+    DirectivesStack::release(directive);
+  }
+}
+
 nmethod* CompileBroker::compile_method(const methodHandle& method, int osr_bci,
                                        int comp_level,
                                        int hot_count,
+                                       bool requires_online_compilation,
                                        CompileTask::CompileReason compile_reason,
                                        TRAPS) {
   // Do nothing if compilebroker is not initialized or compiles are submitted on level none
@@ -1382,7 +1532,7 @@ nmethod* CompileBroker::compile_method(const methodHandle& method, int osr_bci,
 
   DirectiveSet* directive = DirectivesStack::getMatchingDirective(method, comp);
   // CompileBroker::compile_method can trap and can have pending async exception.
-  nmethod* nm = CompileBroker::compile_method(method, osr_bci, comp_level, hot_count, compile_reason, directive, THREAD);
+  nmethod* nm = CompileBroker::compile_method(method, osr_bci, comp_level, hot_count, requires_online_compilation, compile_reason, directive, THREAD);
   DirectivesStack::release(directive);
   return nm;
 }
@@ -1390,6 +1540,7 @@ nmethod* CompileBroker::compile_method(const methodHandle& method, int osr_bci,
 nmethod* CompileBroker::compile_method(const methodHandle& method, int osr_bci,
                                          int comp_level,
                                          int hot_count,
+                                         bool requires_online_compilation,
                                          CompileTask::CompileReason compile_reason,
                                          DirectiveSet* directive,
                                          TRAPS) {
@@ -1398,8 +1549,15 @@ nmethod* CompileBroker::compile_method(const methodHandle& method, int osr_bci,
   assert(method->method_holder()->is_instance_klass(), "not an instance method");
   assert(osr_bci == InvocationEntryBci || (0 <= osr_bci && osr_bci < method->code_size()), "bci out of range");
   assert(!method->is_abstract() && (osr_bci == InvocationEntryBci || !method->is_native()), "cannot compile abstract/native methods");
-  assert(!method->method_holder()->is_not_initialized(), "method holder must be initialized");
+  assert(!method->method_holder()->is_not_initialized()   ||
+         compile_reason == CompileTask::Reason_Preload    ||
+         CompileTask::reason_is_aot_compile(compile_reason), "method holder must be initialized");
   // return quickly if possible
+  bool aot_compilation = CDSConfig::is_dumping_aot_code();
+  if (aot_compilation && !CompileTask::reason_is_aot_compile(compile_reason)) {
+    // Skip normal compilations when compiling AOT code to speedup AOT compilation
+    return nullptr;
+  }
 
   // lock, make sure that the compilation
   // isn't prohibited in a straightforward way.
@@ -1412,7 +1570,7 @@ nmethod* CompileBroker::compile_method(const methodHandle& method, int osr_bci,
     // standard compilation
     nmethod* method_code = method->code();
     if (method_code != nullptr) {
-      if (compilation_is_complete(method, osr_bci, comp_level)) {
+      if (compilation_is_complete(method, osr_bci, comp_level, requires_online_compilation, compile_reason)) {
         return method_code;
       }
     }
@@ -1429,7 +1587,9 @@ nmethod* CompileBroker::compile_method(const methodHandle& method, int osr_bci,
 
   assert(!HAS_PENDING_EXCEPTION, "No exception should be present");
   // some prerequisites that are compiler specific
-  if (comp->is_c2() || comp->is_jvmci()) {
+  if (compile_reason != CompileTask::Reason_Preload &&
+      !CompileTask::reason_is_aot_compile(compile_reason) &&
+     (comp->is_c2() || comp->is_jvmci())) {
     InternalOOMEMark iom(THREAD);
     method->constants()->resolve_string_constants(CHECK_AND_CLEAR_NONASYNC_NULL);
     // Resolve all classes seen in the signature of the method
@@ -1484,8 +1644,11 @@ nmethod* CompileBroker::compile_method(const methodHandle& method, int osr_bci,
     if (!should_compile_new_jobs()) {
       return nullptr;
     }
-    bool is_blocking = !directive->BackgroundCompilationOption || ReplayCompiles;
-    compile_method_base(method, osr_bci, comp_level, hot_count, compile_reason, is_blocking, THREAD);
+    bool is_blocking = ReplayCompiles                                             ||
+                       !directive->BackgroundCompilationOption                    ||
+                       (PreloadBlocking && (compile_reason == CompileTask::Reason_Preload));
+    compile_method_base(method, nullptr, osr_bci, comp_level, hot_count, compile_reason,
+                        requires_online_compilation, is_blocking, THREAD);
   }
 
   // return requested nmethod
@@ -1501,9 +1664,14 @@ nmethod* CompileBroker::compile_method(const methodHandle& method, int osr_bci,
 // CompileBroker::compilation_is_complete
 //
 // See if compilation of this method is already complete.
-bool CompileBroker::compilation_is_complete(const methodHandle& method,
-                                            int                 osr_bci,
-                                            int                 comp_level) {
+bool CompileBroker::compilation_is_complete(const methodHandle&        method,
+                                            int                        osr_bci,
+                                            int                        comp_level,
+                                            bool                       online_only,
+                                            CompileTask::CompileReason compile_reason) {
+  if (CompileTask::reason_is_aot_compile(compile_reason)) {
+    return false; // FIXME: any restrictions?
+  }
   bool is_osr = (osr_bci != standard_entry_bci);
   if (is_osr) {
     if (method->is_not_osr_compilable(comp_level)) {
@@ -1517,8 +1685,17 @@ bool CompileBroker::compilation_is_complete(const methodHandle& method,
       return true;
     } else {
       nmethod* result = method->code();
-      if (result == nullptr) return false;
-      return comp_level == result->comp_level();
+      if (result == nullptr) {
+        return false;
+      }
+      if (online_only && result->is_aot()) {
+        return false;
+      }
+      bool same_level = (comp_level == result->comp_level());
+      if (result->preloaded()) {
+        return !same_level; // Allow replace preloaded code with new code of the same level
+      }
+      return same_level;
     }
   }
 }
@@ -1633,10 +1810,13 @@ CompileTask* CompileBroker::create_compile_task(CompileQueue*       queue,
                                                 int                 osr_bci,
                                                 int                 comp_level,
                                                 int                 hot_count,
+                                                AOTCodeEntry*       aot_code_entry,
                                                 CompileTask::CompileReason compile_reason,
+                                                bool                requires_online_compilation,
                                                 bool                blocking) {
   CompileTask* new_task = new CompileTask(compile_id, method, osr_bci, comp_level,
-                                          hot_count, compile_reason, blocking);
+                                          hot_count, aot_code_entry, compile_reason,
+                                          requires_online_compilation, blocking);
   queue->add(new_task);
   return new_task;
 }
@@ -1829,6 +2009,8 @@ void CompileBroker::free_buffer_blob_if_allocated(CompilerThread* thread) {
 void CompileBroker::shutdown_compiler_runtime(AbstractCompiler* comp, CompilerThread* thread) {
   free_buffer_blob_if_allocated(thread);
 
+  log_info(compilation)("shutdown_compiler_runtime: " INTPTR_FORMAT, p2i(thread));
+
   if (comp->should_perform_shutdown()) {
     // There are two reasons for shutting down the compiler
     // 1) compiler runtime initialization failed
@@ -1872,6 +2054,11 @@ CompileLog* CompileBroker::get_log(CompilerThread* ct) {
   assert(logs != nullptr, "must be initialized at this point");
   int count = c1 ? _c1_count : _c2_count;
 
+  if (ct->queue() == _ac1_compile_queue || ct->queue() == _ac2_compile_queue) {
+    compiler_objects = _ac_objects;
+    logs  = _ac_logs;
+    count = _ac_count;
+  }
   // Find Compiler number by its threadObj.
   oop compiler_obj = ct->threadObj();
   int compiler_number = 0;
@@ -1997,7 +2184,9 @@ void CompileBroker::compiler_thread_loop() {
         task->set_failure_reason("breakpoints are present");
       }
 
-      if (UseDynamicNumberOfCompilerThreads) {
+      // Don't use AOT compielr threads for dynamic C1 and C2 threads creation.
+      if (UseDynamicNumberOfCompilerThreads &&
+          (queue == _c1_compile_queue || queue == _c2_compile_queue)) {
         possibly_add_compiler_threads(thread);
         assert(!thread->has_pending_exception(), "should have been handled");
       }
@@ -2345,7 +2534,7 @@ void CompileBroker::invoke_compiler_on_method(CompileTask* task) {
       comp->compile_method(&ci_env, target, osr_bci, true, directive);
 
       /* Repeat compilation without installing code for profiling purposes */
-      int repeat_compilation_count = directive->RepeatCompilationOption;
+      int repeat_compilation_count = task->is_aot_load() ? 0 : directive->RepeatCompilationOption;
       if (repeat_compilation_count > 0) {
         CHeapStringHolder failure_reason;
         failure_reason.set(ci_env._failure_reason.get());
@@ -2362,7 +2551,7 @@ void CompileBroker::invoke_compiler_on_method(CompileTask* task) {
     }
 
 
-    if (!ci_env.failing() && !task->is_success()) {
+    if (!ci_env.failing() && !task->is_success() && !task->is_aot_compile()) {
       assert(ci_env.failure_reason() != nullptr, "expect failure reason");
       assert(false, "compiler should always document failure: %s", ci_env.failure_reason());
       // The compiler elected, without comment, not to register a result.
@@ -2402,6 +2591,7 @@ void CompileBroker::invoke_compiler_on_method(CompileTask* task) {
     }
   }
 
+  task->mark_finished(os::elapsed_counter());
   DirectivesStack::release(directive);
 
   methodHandle method(thread, task->method());
@@ -2410,14 +2600,9 @@ void CompileBroker::invoke_compiler_on_method(CompileTask* task) {
 
   collect_statistics(thread, time, task);
 
-  if (PrintCompilation && PrintCompilation2) {
-    tty->print("%7d ", (int) tty->time_stamp().milliseconds());  // print timestamp
-    tty->print("%4d ", compile_id);    // print compilation number
-    tty->print("%s ", (is_osr ? "%" : " "));
-    if (task->is_success()) {
-      tty->print("size: %d(%d) ", task->nm_total_size(), task->nm_insts_size());
-    }
-    tty->print_cr("time: %d inlined: %d bytes", (int)time.milliseconds(), task->num_inlined_bytecodes());
+  if (PrintCompilation2) {
+    ResourceMark rm;
+    task->print_post(tty);
   }
 
   Log(compilation, codecache) log;
@@ -2579,6 +2764,17 @@ void CompileBroker::collect_statistics(CompilerThread* thread, elapsedTimer time
       _perf_total_bailout_count->inc();
     }
     _t_bailedout_compilation.add(time);
+
+    if (CITime || log_is_enabled(Info, init)) {
+      CompilerStatistics* stats = nullptr;
+      if (task->is_aot_load()) {
+        int level = task->preload() ? CompLevel_full_optimization : (comp_level - 1);
+        stats = &_aot_stats_per_level[level];
+      } else {
+        stats = &_stats_per_level[comp_level-1];
+      }
+      stats->_bailout.update(time, 0);
+    }
   } else if (!task->is_success()) {
     if (UsePerfData) {
       _perf_last_invalidated_method->set_value(counters->current_method());
@@ -2587,9 +2783,20 @@ void CompileBroker::collect_statistics(CompilerThread* thread, elapsedTimer time
     }
     _total_invalidated_count++;
     _t_invalidated_compilation.add(time);
+
+    if (CITime || log_is_enabled(Info, init)) {
+      CompilerStatistics* stats = nullptr;
+      if (task->is_aot_load()) {
+        int level = task->preload() ? CompLevel_full_optimization : (comp_level - 1);
+        stats = &_aot_stats_per_level[level];
+      } else {
+        stats = &_stats_per_level[comp_level-1];
+      }
+      stats->_invalidated.update(time, 0);
+    }
   } else {
     // Compilation succeeded
-    if (CITime) {
+    if (CITime || log_is_enabled(Info, init)) {
       int bytes_compiled = method->code_size() + task->num_inlined_bytecodes();
       if (is_osr) {
         _t_osr_compilation.add(time);
@@ -2600,7 +2807,16 @@ void CompileBroker::collect_statistics(CompilerThread* thread, elapsedTimer time
       }
 
       // Collect statistic per compilation level
-      if (comp_level > CompLevel_none && comp_level <= CompLevel_full_optimization) {
+      if (task->is_aot_load()) {
+        _aot_stats._standard.update(time, bytes_compiled);
+        _aot_stats._nmethods_size += task->nm_total_size();
+        _aot_stats._nmethods_code_size += task->nm_insts_size();
+        int level = task->preload() ? CompLevel_full_optimization : (comp_level - 1);
+        CompilerStatistics* stats = &_aot_stats_per_level[level];
+        stats->_standard.update(time, bytes_compiled);
+        stats->_nmethods_size += task->nm_total_size();
+        stats->_nmethods_code_size += task->nm_insts_size();
+      } else if (comp_level > CompLevel_none && comp_level <= CompLevel_full_optimization) {
         CompilerStatistics* stats = &_stats_per_level[comp_level-1];
         if (is_osr) {
           stats->_osr.update(time, bytes_compiled);
@@ -2614,8 +2830,8 @@ void CompileBroker::collect_statistics(CompilerThread* thread, elapsedTimer time
       }
 
       // Collect statistic per compiler
-      AbstractCompiler* comp = compiler(comp_level);
-      if (comp) {
+      AbstractCompiler* comp = task->compiler();
+      if (comp && !task->is_aot_load()) {
         CompilerStatistics* stats = comp->stats();
         if (is_osr) {
           stats->_osr.update(time, bytes_compiled);
@@ -2624,7 +2840,7 @@ void CompileBroker::collect_statistics(CompilerThread* thread, elapsedTimer time
         }
         stats->_nmethods_size += task->nm_total_size();
         stats->_nmethods_code_size += task->nm_insts_size();
-      } else { // if (!comp)
+      } else if (!task->is_aot_load()) { // if (!comp)
         assert(false, "Compiler object must exist");
       }
     }
@@ -2687,6 +2903,24 @@ jlong CompileBroker::total_compilation_ticks() {
   return _perf_total_compilation != nullptr ? _perf_total_compilation->get_value() : 0;
 }
 
+void CompileBroker::log_not_entrant(nmethod* nm) {
+  _total_not_entrant_count++;
+  if (CITime || log_is_enabled(Info, init)) {
+    CompilerStatistics* stats = nullptr;
+    int level = nm->comp_level();
+    if (nm->is_aot()) {
+      if (nm->preloaded()) {
+        assert(level == CompLevel_full_optimization, "%d", level);
+        level = CompLevel_full_optimization + 1;
+      }
+      stats = &_aot_stats_per_level[level - 1];
+    } else {
+      stats = &_stats_per_level[level - 1];
+    }
+    stats->_made_not_entrant._count++;
+  }
+}
+
 void CompileBroker::print_times(const char* name, CompilerStatistics* stats) {
   tty->print_cr("  %s {speed: %6.3f bytes/s; standard: %6.3f s, %u bytes, %u methods; osr: %6.3f s, %u bytes, %u methods; nmethods_size: %u bytes; nmethods_code_size: %u bytes}",
                 name, stats->bytes_per_second(),
@@ -2695,11 +2929,100 @@ void CompileBroker::print_times(const char* name, CompilerStatistics* stats) {
                 stats->_nmethods_size, stats->_nmethods_code_size);
 }
 
+static void print_helper(outputStream* st, const char* name, CompilerStatistics::Data data, bool print_time = true) {
+  if (data._count > 0) {
+    st->print("; %s: %4u methods", name, data._count);
+    if (print_time) {
+      st->print(" (in %.3fs)", data._time.seconds());
+    }
+  }
+}
+
+static void print_tier_helper(outputStream* st, const char* prefix, int tier, CompilerStatistics* stats) {
+  st->print("    %s%d: %5u methods", prefix, tier, stats->_standard._count);
+  if (stats->_standard._count > 0) {
+    st->print(" (in %.3fs)", stats->_standard._time.seconds());
+  }
+  print_helper(st, "osr",     stats->_osr);
+  print_helper(st, "bailout", stats->_bailout);
+  print_helper(st, "invalid", stats->_invalidated);
+  print_helper(st, "not_entrant", stats->_made_not_entrant, false);
+  st->cr();
+}
+
+static void print_queue_info(outputStream* st, CompileQueue* queue) {
+  if (queue != nullptr) {
+    MutexLocker ml(MethodCompileQueue_lock);
+
+    uint  total_cnt = 0;
+    uint active_cnt = 0;
+    for (JavaThread* jt : *ThreadsSMRSupport::get_java_thread_list()) {
+      guarantee(jt != nullptr, "");
+      if (jt->is_Compiler_thread()) {
+        CompilerThread* ct = (CompilerThread*)jt;
+
+        guarantee(ct != nullptr, "");
+        if (ct->queue() == queue) {
+          ++total_cnt;
+          CompileTask* task = ct->task();
+          if (task != nullptr) {
+            ++active_cnt;
+          }
+        }
+      }
+    }
+
+    st->print("  %s (%d active / %d total threads): %u tasks",
+              queue->name(), active_cnt, total_cnt, queue->size());
+    if (queue->size() > 0) {
+      uint counts[] = {0, 0, 0, 0, 0}; // T1 ... T5
+      for (CompileTask* task = queue->first(); task != nullptr; task = task->next()) {
+        int tier = task->comp_level();
+        if (task->is_aot_load() && task->preload()) {
+          assert(tier == CompLevel_full_optimization, "%d", tier);
+          tier = CompLevel_full_optimization + 1;
+        }
+        counts[tier-1]++;
+      }
+      st->print(":");
+      for (int tier = CompLevel_simple; tier <= CompilationPolicy::highest_compile_level() + 1; tier++) {
+        uint cnt = counts[tier-1];
+        if (cnt > 0) {
+          st->print(" T%d: %u tasks;", tier, cnt);
+        }
+      }
+    }
+    st->cr();
+  }
+}
+void CompileBroker::print_statistics_on(outputStream* st) {
+  st->print_cr("  Total: %u methods; %u bailouts, %u invalidated, %u non_entrant",
+               _total_compile_count, _total_bailout_count, _total_invalidated_count, _total_not_entrant_count);
+  for (int tier = CompLevel_simple; tier <= CompilationPolicy::highest_compile_level(); tier++) {
+    print_tier_helper(st, "Tier", tier, &_stats_per_level[tier-1]);
+  }
+  st->cr();
+
+  if (AOTCodeCaching) {
+    for (int tier = CompLevel_simple; tier <= CompilationPolicy::highest_compile_level() + 1; tier++) {
+      if (tier != CompLevel_full_profile) {
+        print_tier_helper(st, "AOT Code T", tier, &_aot_stats_per_level[tier - 1]);
+      }
+    }
+    st->cr();
+  }
+
+  print_queue_info(st, _c1_compile_queue);
+  print_queue_info(st, _c2_compile_queue);
+  print_queue_info(st, _ac1_compile_queue);
+  print_queue_info(st, _ac2_compile_queue);
+}
+
 void CompileBroker::print_times(bool per_compiler, bool aggregate) {
   if (per_compiler) {
     if (aggregate) {
       tty->cr();
-      tty->print_cr("Individual compiler times (for compiled methods only)");
+      tty->print_cr("[%dms] Individual compiler times (for compiled methods only)", (int)tty->time_stamp().milliseconds());
       tty->print_cr("------------------------------------------------");
       tty->cr();
     }
@@ -2708,6 +3031,9 @@ void CompileBroker::print_times(bool per_compiler, bool aggregate) {
       if (comp != nullptr) {
         print_times(comp->name(), comp->stats());
       }
+    }
+    if (_aot_stats._standard._count > 0) {
+      print_times("AC", &_aot_stats);
     }
     if (aggregate) {
       tty->cr();
@@ -2720,6 +3046,13 @@ void CompileBroker::print_times(bool per_compiler, bool aggregate) {
       CompilerStatistics* stats = &_stats_per_level[tier-1];
       os::snprintf_checked(tier_name, sizeof(tier_name), "Tier%d", tier);
       print_times(tier_name, stats);
+    }
+    for (int tier = CompLevel_simple; tier <= CompilationPolicy::highest_compile_level() + 1; tier++) {
+      CompilerStatistics* stats = &_aot_stats_per_level[tier-1];
+      if (stats->_standard._bytes > 0) {
+        os::snprintf_checked(tier_name, sizeof(tier_name), "AOT Code T%d", tier);
+        print_times(tier_name, stats);
+      }
     }
   }
 
@@ -2762,6 +3095,10 @@ void CompileBroker::print_times(bool per_compiler, bool aggregate) {
                 CompileBroker::_t_invalidated_compilation.seconds(),
                 total_invalidated_count == 0 ? 0.0 : CompileBroker::_t_invalidated_compilation.seconds() / total_invalidated_count);
 
+  if (AOTCodeCaching) { // Check flags because AOT code cache could be closed already
+    tty->cr();
+    AOTCodeCache::print_timers_on(tty);
+  }
   AbstractCompiler *comp = compiler(CompLevel_simple);
   if (comp != nullptr) {
     tty->cr();

@@ -165,6 +165,7 @@ public:
   // Dependencies
   friend class StubGenerator;
   friend class VMStructs;
+  friend class AOTCodeAddressTable;
 #if INCLUDE_JVMCI
   friend class JVMCIVMStructs;
 #endif

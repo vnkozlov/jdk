@@ -30,6 +30,7 @@
 #include "c1/c1_MacroAssembler.hpp"
 #include "c1/c1_Runtime1.hpp"
 #include "c1/c1_ValueType.hpp"
+#include "code/aotCodeCache.hpp"
 #include "compiler/compileBroker.hpp"
 #include "compiler/compilerDirectives.hpp"
 #include "interpreter/linkResolver.hpp"
@@ -252,6 +253,27 @@ bool Compiler::is_intrinsic_supported(vmIntrinsics::ID id) {
 }
 
 void Compiler::compile_method(ciEnv* env, ciMethod* method, int entry_bci, bool install_code, DirectiveSet* directive) {
+  CompileTask* task = env->task();
+  if (install_code && task->is_aot_load()) {
+    assert(!task->preload(), "Pre-loading AOT code is not implemeted for C1 code");
+    bool success = AOTCodeCache::load_nmethod(env, method, entry_bci, this, CompLevel(task->comp_level()));
+    if (success) {
+      assert(task->is_success(), "sanity");
+      return;
+    }
+    AOTCodeCache::invalidate(task->aot_code_entry()); // mark aot_code_entry as not entrant
+    if (AOTCodeCache::is_code_load_thread_on()) {
+      // Bail out if AOT code load failed in AOT Code loading thread
+      // when UseAOTCodeLoadThread flag is on.
+      // We want this thread go quickly through AOT code load requests
+      // instead of spending time on normal compilation.
+      env->record_failure("Failed to load AOT code");
+      return;
+    } else {
+      // Do normal compilation
+      task->clear_aot();
+    }
+  }
   BufferBlob* buffer_blob = CompilerThread::current()->get_buffer_blob();
   assert(buffer_blob != nullptr, "Must exist");
   // invoke compilation

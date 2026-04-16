@@ -150,10 +150,13 @@
   product(bool, AOTVerifyTrainingData, trueInDebug, DIAGNOSTIC,             \
           "Verify archived training data")                                  \
                                                                             \
-  product(bool, AOTCompileEagerly, false, EXPERIMENTAL,                     \
-          "Compile methods as soon as possible")                            \
+  product(bool, AOTCompileEagerly, false, DIAGNOSTIC,                       \
+          "Compile methods as soon as possible during production run")      \
                                                                             \
   /* AOT Code flags */                                                      \
+                                                                            \
+  product(bool, AOTCodeCaching, false, DIAGNOSTIC,                          \
+          "Enable saving and restoring JIT comiled code in AOT cache")      \
                                                                             \
   product(bool, AOTAdapterCaching, false, DIAGNOSTIC,                       \
           "Enable saving and restoring i2c2i adapters in AOT cache")        \
@@ -161,7 +164,7 @@
   product(bool, AOTStubCaching, false, DIAGNOSTIC,                          \
           "Enable saving and restoring stubs and code blobs in AOT cache")  \
                                                                             \
-  product(uint, AOTCodeMaxSize, 10*M, DIAGNOSTIC,                           \
+  product(uint, AOTCodeMaxSize, 512*M, DIAGNOSTIC,                          \
           "Buffer size in bytes for AOT code caching")                      \
           range(1*M, max_jint)                                              \
                                                                             \
@@ -171,6 +174,15 @@
                                                                             \
   develop(bool, TestAOTAdapterLinkFailure, false,                           \
           "Test failure of adapter linking when loading from AOT cache.")   \
+                                                                            \
+  product(bool, AOTCodeCPUFeatureCheck, true, DIAGNOSTIC,                   \
+          "Check CPU features during production run are compatible "        \
+          "with the CPU features used during the assembly phase.")          \
+                                                                            \
+  /*========== New options added by Leyden =============================*/  \
+                                                                            \
+  product(bool, SkipArchiveHeapVerification, false, DIAGNOSTIC,             \
+          "Skip verification of CDS archive heap")                          \
 
 // end of CDS_FLAGS
 

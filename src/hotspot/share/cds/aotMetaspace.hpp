@@ -91,6 +91,7 @@ public:
   }
 
   static void initialize_for_static_dump() NOT_CDS_RETURN;
+  static void open_static_archive() NOT_CDS_RETURN;
   static void initialize_runtime_shared_and_meta_spaces() NOT_CDS_RETURN;
   static void post_initialize(TRAPS) NOT_CDS_RETURN;
 
@@ -194,7 +195,6 @@ private:
                                    FileMapInfo* map_info,
                                    AOTMappedHeapInfo* mapped_heap_info,
                                    AOTStreamedHeapInfo* streamed_heap_info);
-  static FileMapInfo* open_static_archive();
   static FileMapInfo* open_dynamic_archive();
   // use_requested_addr: If true (default), attempt to map at the address the
   static MapArchiveResult map_archives(FileMapInfo* static_mapinfo, FileMapInfo* dynamic_mapinfo,

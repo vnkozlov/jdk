@@ -32,8 +32,10 @@
 #include "runtime/mutexLocker.hpp"
 #include "utilities/xmlstream.hpp"
 
+class CompileQueue;
 class CompileTrainingData;
 class DirectiveSet;
+class AOTCodeEntry;
 
 JVMCI_ONLY(class JVMCICompileState;)
 
@@ -64,6 +66,9 @@ class CompileTask : public CHeapObj<mtCompiler> {
       Reason_Whitebox,         // Whitebox API
       Reason_MustBeCompiled,   // Used for -Xcomp or AlwaysCompileLoopMethods (see CompilationPolicy::must_be_compiled())
       Reason_Bootstrap,        // JVMCI bootstrap
+      Reason_Preload,          // pre-load AOT code
+      Reason_AOTCompile,
+      Reason_AOTCompileForPreload,
       Reason_Count
   };
 
@@ -76,9 +81,17 @@ class CompileTask : public CHeapObj<mtCompiler> {
       "replay",
       "whitebox",
       "must_be_compiled",
-      "bootstrap"
+      "bootstrap",
+      "preload",
+      "aot_compile",
+      "aot_compile_for_preload",
     };
     return reason_names[compile_reason];
+  }
+
+  static bool reason_is_aot_compile(CompileTask::CompileReason compile_reason) {
+    return (compile_reason == CompileTask::Reason_AOTCompile) ||
+           (compile_reason == CompileTask::Reason_AOTCompileForPreload);
   }
 
  private:
@@ -89,11 +102,14 @@ class CompileTask : public CHeapObj<mtCompiler> {
   int                  _osr_bci;
   bool                 _is_complete;
   bool                 _is_success;
+  bool                 _requires_online_compilation;
   bool                 _is_blocking;
   CodeSection::csize_t _nm_content_size;
   CodeSection::csize_t _nm_total_size;
   CodeSection::csize_t _nm_insts_size;
-  DirectiveSet*  _directive;
+  DirectiveSet*        _directive;
+  AbstractCompiler*    _compiler;
+  AOTCodeEntry*        _aot_code_entry;
 #if INCLUDE_JVMCI
   bool                 _has_waiter;
   // Compilation state for a blocking JVMCI compilation
@@ -104,8 +120,12 @@ class CompileTask : public CHeapObj<mtCompiler> {
   CompileTask*         _next;
   CompileTask*         _prev;
   // Fields used for logging why the compilation was initiated:
+  jlong                _time_created; // time when task was created
   jlong                _time_queued;  // time when task was enqueued
   jlong                _time_started; // time when compilation started
+  jlong                _time_finished; // time when compilation finished
+  jlong                _aot_load_start;
+  jlong                _aot_load_finish;
   int                  _hot_count;    // information about its invocation counter
   CompileReason        _compile_reason;      // more info about the task
   const char*          _failure_reason;
@@ -116,23 +136,32 @@ class CompileTask : public CHeapObj<mtCompiler> {
 
  public:
   CompileTask(int compile_id, const methodHandle& method, int osr_bci, int comp_level,
-              int hot_count, CompileReason compile_reason, bool is_blocking);
+                  int hot_count, AOTCodeEntry* aot_code_entry,
+                  CompileTask::CompileReason compile_reason,
+                  bool requires_online_compilation, bool is_blocking);
   ~CompileTask();
+
   static void wait_for_no_active_tasks();
 
-  int          compile_id() const                { return _compile_id; }
-  Method*      method() const                    { return _method; }
-  int          osr_bci() const                   { return _osr_bci; }
-  bool         is_complete() const               { return _is_complete; }
-  bool         is_blocking() const               { return _is_blocking; }
-  bool         is_success() const                { return _is_success; }
-  DirectiveSet* directive() const                { return _directive; }
+  int          compile_id() const                   { return _compile_id; }
+  Method*      method() const                       { return _method; }
+  int          osr_bci() const                      { return _osr_bci; }
+  bool         is_complete() const                  { return _is_complete; }
+  bool         is_blocking() const                  { return _is_blocking; }
+  bool         is_success() const                   { return _is_success; }
+  bool         is_aot_load() const                  { return _aot_code_entry != nullptr; }
+  void         clear_aot()                          { _aot_code_entry = nullptr; }
+  AOTCodeEntry* aot_code_entry()                    { return _aot_code_entry; }
+  bool         requires_online_compilation() const  { return _requires_online_compilation; }
+  DirectiveSet* directive() const                   { return _directive; }
+  CompileReason compile_reason() const              { return _compile_reason; }
   CodeSection::csize_t nm_content_size() { return _nm_content_size; }
   void         set_nm_content_size(CodeSection::csize_t size) { _nm_content_size = size; }
   CodeSection::csize_t nm_insts_size() { return _nm_insts_size; }
   void         set_nm_insts_size(CodeSection::csize_t size) { _nm_insts_size = size; }
   CodeSection::csize_t nm_total_size() { return _nm_total_size; }
   void         set_nm_total_size(CodeSection::csize_t size) { _nm_total_size = size; }
+  bool         preload() const                   { return (_compile_reason == Reason_Preload); }
   bool         can_become_stale() const          {
     switch (_compile_reason) {
       case Reason_BackedgeCount:
@@ -164,10 +193,17 @@ class CompileTask : public CHeapObj<mtCompiler> {
   }
 #endif
 
+  bool is_aot_compile() {
+    return reason_is_aot_compile(compile_reason());
+  }
+
   void         mark_complete()                   { _is_complete = true; }
   void         mark_success()                    { _is_success = true; }
+  void         mark_queued(jlong time)           { _time_queued = time; }
   void         mark_started(jlong time)          { _time_started = time; }
-
+  void         mark_finished(jlong time)         { _time_finished = time; }
+  void         mark_aot_load_start(jlong time)   { _aot_load_start = time; }
+  void         mark_aot_load_finish(jlong time)  { _aot_load_finish = time; }
   int          comp_level()                      { return _comp_level;}
   void         set_comp_level(int comp_level)    { _comp_level = comp_level;}
 
@@ -198,8 +234,14 @@ class CompileTask : public CHeapObj<mtCompiler> {
 private:
   static void  print_impl(outputStream* st, Method* method, int compile_id, int comp_level,
                                       bool is_osr_method = false, int osr_bci = -1, bool is_blocking = false,
+                                      bool is_aot = false, bool is_preload = false,
+                                      const char* compiler_name = nullptr,
                                       const char* msg = nullptr, bool short_form = false, bool cr = true,
-                                      jlong time_queued = 0, jlong time_started = 0);
+                                      bool after_compile_details = false,
+                                      int inlined_bytecodes = 0, int nm_total_size = 0, int nm_insts_size = 0,
+                                      jlong time_created = 0, jlong time_queued = 0,
+                                      jlong time_started = 0, jlong time_finished = 0,
+                                      jlong aot_load_start = 0, jlong aot_load_finish = 0);
 
 public:
   void         print(outputStream* st = tty, const char* msg = nullptr, bool short_form = false, bool cr = true);
@@ -207,7 +249,8 @@ public:
   static void  print(outputStream* st, const nmethod* nm, const char* msg = nullptr, bool short_form = false, bool cr = true) {
     print_impl(st, nm->method(), nm->compile_id(), nm->comp_level(),
                            nm->is_osr_method(), nm->is_osr_method() ? nm->osr_entry_bci() : -1, /*is_blocking*/ false,
-                           msg, short_form, cr);
+                           nm->is_aot(), nm->preloaded(),
+                           nm->compiler_name(), msg, short_form, cr);
   }
   static void  print_ul(const nmethod* nm, const char* msg = nullptr);
 
@@ -217,6 +260,7 @@ public:
   static void  print_inline_indent(int inline_level, outputStream* st = tty);
 
   void         print_tty();
+  void         print_post(outputStream* st);
   void         print_line_on_error(outputStream* st, char* buf, int buflen);
 
   void         log_task(xmlStream* log);

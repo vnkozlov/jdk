@@ -33,6 +33,7 @@ typedef void (*initializer)(void);
 
 // Per-compiler statistics
 class CompilerStatistics {
+ public:
   class Data {
     friend class VMStructs;
   public:
@@ -53,6 +54,9 @@ class CompilerStatistics {
  public:
   Data _standard;  // stats for non-OSR compilations
   Data _osr;       // stats for OSR compilations
+  Data _bailout;
+  Data _invalidated;
+  Data _made_not_entrant;
   uint _nmethods_size; //
   uint _nmethods_code_size;
 
