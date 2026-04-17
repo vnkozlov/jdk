@@ -482,7 +482,7 @@ class nmethod : public CodeBlob {
   void oops_do_set_strong_done(nmethod* old_head);
 
   void record_nmethod_dependency();
-
+#if INCLUDE_CDS
   nmethod* restore(address code_cache_buffer,
                    const methodHandle& method,
                    AOTCodeReader* aot_code_reader);
@@ -493,7 +493,8 @@ public:
                               const methodHandle& method,
                               AbstractCompiler* compiler,
                               AOTCodeReader* aot_code_reader);
-
+#endif
+public:
   // If you change anything in this enum please patch
   // vmStructs_jvmci.cpp accordingly.
   enum class InvalidationReason : s1 {

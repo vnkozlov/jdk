@@ -155,10 +155,13 @@ InstanceKlass::ClassState ciInstanceKlass::compute_shared_init_state() {
 
 InstanceKlass::ClassState ciInstanceKlass::compute_init_state(InstanceKlass* ik) {
   ASSERT_IN_VM;
+#if INCLUDE_CDS
   ciEnv* env = CURRENT_ENV;
   if (env != nullptr && env->is_aot_compile()) {
     return env->compute_init_state_for_aot_compile(ik);
-  } else {
+  } else
+#endif
+  {
     return ik->init_state();
   }
 }

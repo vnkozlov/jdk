@@ -1049,8 +1049,8 @@ bool ciMethod::ensure_method_data(bool training_data_only) {
 // ciMethod::method_data
 //
 ciMethodData* ciMethod::method_data() {
-  if (CURRENT_ENV->is_aot_compile() && CURRENT_ENV->task()->comp_level() == CompLevel_full_optimization) {
 #if INCLUDE_CDS
+  if (CURRENT_ENV->is_aot_compile() && CURRENT_ENV->task()->comp_level() == CompLevel_full_optimization) {
     if (_method_data_recorded == nullptr) {
       VM_ENTRY_MARK;
       methodHandle h_m(thread, get_Method());
@@ -1077,22 +1077,21 @@ ciMethodData* ciMethod::method_data() {
     }
     assert(_method_data_recorded != nullptr, "");
     return _method_data_recorded;
+  }
 #endif
-  } else {
-    if (_method_data != nullptr) {
-      return _method_data;
-    }
-    VM_ENTRY_MARK;
-    methodHandle h_m(thread, get_Method());
-    MethodData* mdo = h_m()->method_data();
-    if (mdo != nullptr) {
-      _method_data = CURRENT_ENV->get_method_data(mdo);
-      _method_data->load_data();
-    } else {
-      _method_data = CURRENT_ENV->get_empty_methodData();
-    }
+  if (_method_data != nullptr) {
     return _method_data;
   }
+  VM_ENTRY_MARK;
+  methodHandle h_m(thread, get_Method());
+  MethodData* mdo = h_m()->method_data();
+  if (mdo != nullptr) {
+    _method_data = CURRENT_ENV->get_method_data(mdo);
+    _method_data->load_data();
+  } else {
+    _method_data = CURRENT_ENV->get_empty_methodData();
+  }
+  return _method_data;
 }
 
 // ------------------------------------------------------------------

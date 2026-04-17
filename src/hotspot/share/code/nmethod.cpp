@@ -1239,6 +1239,7 @@ nmethod* nmethod::new_nmethod(const methodHandle& method,
   return nm;
 }
 
+#if INCLUDE_CDS
 nmethod* nmethod::restore(address code_cache_buffer,
                           const methodHandle& method,
                           AOTCodeReader* aot_code_reader)
@@ -1292,6 +1293,7 @@ nmethod* nmethod::new_nmethod(nmethod* archived_nm,
   }
   return nm;
 }
+#endif // INCLUDE_CDS
 
 // Fill in default values for various fields
 void nmethod::init_defaults(CodeBuffer *code_buffer, CodeOffsets* offsets) {

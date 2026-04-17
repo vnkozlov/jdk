@@ -49,6 +49,7 @@
 #include "compiler/abstractCompiler.hpp"
 #include "compiler/compilationPolicy.hpp"
 #include "compiler/compileBroker.hpp"
+#include "compiler/compilerDefinitions.inline.hpp"
 #include "compiler/compileTask.hpp"
 #include "gc/g1/g1BarrierSetRuntime.hpp"
 #include "gc/shared/barrierSetAssembler.hpp"
