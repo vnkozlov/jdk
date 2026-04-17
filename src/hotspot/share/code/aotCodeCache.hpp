@@ -907,6 +907,7 @@ class AOTRuntimeConstants {
  private:
   address _card_table_base;
   uint    _grain_shift;
+  address _cset_base;
   static address _field_addresses_list[];
   static AOTRuntimeConstants _aot_runtime_constants;
   // private constructor for unique singleton
@@ -922,6 +923,7 @@ class AOTRuntimeConstants {
   }
   static address card_table_base_address();
   static address grain_shift_address() { return (address)&_aot_runtime_constants._grain_shift; }
+  static address cset_base_address() { return (address)&_aot_runtime_constants._cset_base; }
   static address* field_addresses_list() {
     return _field_addresses_list;
   }
@@ -929,6 +931,7 @@ class AOTRuntimeConstants {
   static bool contains(address adr)        { return false; }
   static address card_table_base_address() { return nullptr; }
   static address grain_shift_address()     { return nullptr; }
+  static address cset_base_address()       { return nullptr; }
   static address* field_addresses_list()   { return nullptr; }
 #endif
 };

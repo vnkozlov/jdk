@@ -261,8 +261,16 @@ void ShenandoahBarrierSetAssembler::load_reference_barrier(MacroAssembler* masm,
 
   // Test for in-cset
   if (is_strong) {
-    __ mov(rscratch2, ShenandoahHeap::in_cset_fast_test_addr());
-    __ lsr(rscratch1, r0, ShenandoahHeapRegion::region_size_bytes_shift_jint());
+    if (AOTCodeCache::is_on_for_dump()) {
+      __ lea(rscratch2, ExternalAddress(AOTRuntimeConstants::cset_base_address()));
+      __ ldr(rscratch2, Address(rscratch2));
+      __ lea(rscratch1, ExternalAddress(AOTRuntimeConstants::grain_shift_address()));
+      __ ldrw(rscratch1, Address(rscratch1));
+      __ lsrv(rscratch1, r0, rscratch1);
+    } else {
+      __ mov(rscratch2, ShenandoahHeap::in_cset_fast_test_addr());
+      __ lsr(rscratch1, r0, ShenandoahHeapRegion::region_size_bytes_shift_jint());
+    }
     __ ldrb(rscratch2, Address(rscratch2, rscratch1));
     __ tbz(rscratch2, 0, not_cset);
   }
@@ -709,8 +717,16 @@ void ShenandoahBarrierSetAssembler::gen_load_reference_barrier_stub(LIR_Assemble
 
   if (is_strong) {
     // Check for object in cset.
-    __ mov(tmp2, ShenandoahHeap::in_cset_fast_test_addr());
-    __ lsr(tmp1, res, ShenandoahHeapRegion::region_size_bytes_shift_jint());
+    if (AOTCodeCache::is_on_for_dump()) {
+      __ lea(tmp2, ExternalAddress(AOTRuntimeConstants::cset_base_address()));
+      __ ldr(tmp2, Address(tmp2));
+      __ lea(tmp1, ExternalAddress(AOTRuntimeConstants::grain_shift_address()));
+      __ ldrw(tmp1, Address(tmp1));
+      __ lsrv(tmp1, res, tmp1);
+    } else {
+      __ mov(tmp2, ShenandoahHeap::in_cset_fast_test_addr());
+      __ lsr(tmp1, res, ShenandoahHeapRegion::region_size_bytes_shift_jint());
+    }
     __ ldrb(tmp2, Address(tmp2, tmp1));
     __ cbz(tmp2, *stub->continuation());
   }
