@@ -25,6 +25,7 @@
 
 
 #include "classfile/javaClasses.hpp"
+#include "code/aotCodeCache.hpp"
 #include "gc/shenandoah/c2/shenandoahBarrierSetC2.hpp"
 #include "gc/shenandoah/c2/shenandoahSupport.hpp"
 #include "gc/shenandoah/shenandoahBarrierSetAssembler.hpp"
