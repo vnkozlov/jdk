@@ -3355,7 +3355,7 @@ void AOTCodeReader::read_dbg_strings(DbgStrings& dbg_strings, bool use_string_ta
 //   [_stubs_base, _stubs_base + _stubs_max -1],
 //   [_c_str_base, _c_str_base + _c_str_max -1],
 
-#define _extrs_max 380
+#define _extrs_max 500
 #define _stubs_max static_cast<int>(EntryId::NUM_ENTRYIDS)
 
 #define _extrs_base 0
@@ -3403,8 +3403,6 @@ void AOTCodeAddressTable::init_extrs() {
 
   initializing_extrs = true;
   _extrs_addr = NEW_C_HEAP_ARRAY(address, _extrs_max, mtCode);
-
-  _extrs_length = 0;
 
   {
     // Required by initial stubs
@@ -3652,7 +3650,7 @@ void AOTCodeAddressTable::init_extrs2() {
   }
   _extrs_complete = true;
   initializing_extrs = false;
-  log_info(aot, codecache, init)("External addresses recorded and closed");
+  log_info(aot, codecache, init)("External addresses %d recorded and closed", _extrs_length);
 }
 
 void AOTCodeAddressTable::add_external_addresses(GrowableArray<address>& addresses) {
@@ -3686,6 +3684,7 @@ void AOTCodeAddressTable::set_shared_stubs_complete() {
 
 void AOTCodeAddressTable::set_c1_stubs_complete() {
   assert(!_c1_stubs_complete, "repeated close for c1 stubs!");
+  uint old_extrs_length = _extrs_length;
 #ifdef COMPILER1
 #if INCLUDE_G1GC
   if (UseG1GC) {
@@ -3715,6 +3714,7 @@ void AOTCodeAddressTable::set_c1_stubs_complete() {
 #endif // COMPILER1
   _c1_stubs_complete = true;
   log_info(aot, codecache, init)("C1 stubs recorded and closed");
+  log_info(aot, codecache, init)("External C1 addresses %d recorded", (_extrs_length - old_extrs_length));
 }
 
 void AOTCodeAddressTable::set_c2_stubs_complete() {
