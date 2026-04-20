@@ -3725,6 +3725,11 @@ void AOTCodeAddressTable::set_c2_stubs_complete() {
 
 void AOTCodeAddressTable::set_stubgen_stubs_complete() {
   assert(!_stubgen_stubs_complete, "repeated close for stubgen stubs!");
+#if defined(COMPILER2) && defined(AMD64) && !defined(ZERO)
+  for (int i = 0; i < 4; i++) {
+    ADD_EXTERNAL_ADDRESS(StubRoutines::_string_indexof_array[i]);
+  }
+#endif
   _stubgen_stubs_complete = true;
   log_info(aot, codecache, init)("StubGen stubs recorded and closed");
 }
