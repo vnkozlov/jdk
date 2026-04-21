@@ -25,8 +25,11 @@
 #ifndef SHARE_CDS_AOTCACHEACCESS_HPP
 #define SHARE_CDS_AOTCACHEACCESS_HPP
 
+#include "cds/aotCompressedPointers.hpp"
+#include "cds/aotMetaspace.hpp"
 #include "cds/archiveBuilder.hpp"
 #include "cds/archiveUtils.hpp"
+#include "cds/cdsConfig.hpp"
 #include "memory/allStatic.hpp"
 #include "oops/oopsHierarchy.hpp"
 #include "utilities/globalDefinitions.hpp"
@@ -39,6 +42,7 @@ class ReservedSpace;
 // AOT Cache API for AOT compiler
 
 class AOTCacheAccess : AllStatic {
+  using narrowPtr = AOTCompressedPointers::narrowPtr;
 private:
   static bool can_generate_aot_code(address addr) NOT_CDS_RETURN_(false);
 public:
@@ -52,38 +56,42 @@ public:
   static bool can_generate_aot_code_for(InstanceKlass* ik) NOT_CDS_RETURN_(false);
 
   /*
-   * Used during an assembly run to compute the offset of the metadata object in the AOT Cache.
-   * The input argument is the "source" address of a metadata object (Method/Klass) loaded by the assembly JVM.
-   * Computation of the offset requires mapping the supplied metadata object to its "requested" address
-   * and subtracting that address from the requested base address.
-   * See ArchiveBuilder.hpp for definition of "source" and "requested" address.
+   * Used during an assembly run to encode metadata object pointer present in the AOT Cache.
+   * The input argument is the address of a metadata object (Method/Klass) loaded by the assembly JVM.
    */
-  static uint delta_from_base_address(address addr);
+  template <typename T>
+  static narrowPtr to_narrow_ptr(T addr) {
+    assert(CDSConfig::is_dumping_final_static_archive(), "must be");
+    assert(ArchiveBuilder::is_active(), "must be");
+    return AOTCompressedPointers::encode_not_null(addr);
+  }
 
   /*
-   * Used during a production run to materialize a pointer to a Klass located in a loaded AOT Cache.
-   * The offset argument identifies a delta from the AOT Cache's currently mapped base address to the start of the Klass object.
-   * The offset is normally obtained by reading a value embedded in some other AOT-ed entry, like an AOT compiled code.
+   * Used during a production run to materialize a real pointer to a Klass from the encoded pointer located in a loaded AOT Cache.
+   * The encoded pointer is normally obtained by reading a value embedded in some other AOT-ed entry, like an AOT compiled code.
    */
-  static Klass* convert_offset_to_klass(uint offset_from_base_addr) {
-    Metadata* metadata = (Metadata*)((address)SharedBaseAddress + offset_from_base_addr);
+  static Klass* narrow_ptr_to_klass(narrowPtr narrowp) {
+    Metadata* metadata = AOTCompressedPointers::decode_not_null<Metadata*>(narrowp);
     assert(metadata->is_klass(), "sanity check");
     return (Klass*)metadata;
   }
 
   /*
-   * Used during a production run to materialize a pointer to a Method located in a loaded AOT Cache.
-   * The offset argument identifies a delta from the AOT Cache's currently mapped base address to the start of the Method object.
-   * The offset is normally obtained by reading a value embedded in some other AOT-ed entry, like an AOT compiled code.
+   * Used during a production run to materialize a real pointer to a Method from the encoded pointer located in a loaded AOT Cache.
+   * The encoded pointer is normally obtained by reading a value embedded in some other AOT-ed entry, like an AOT compiled code.
    */
-  static Method* convert_offset_to_method(uint offset_from_base_addr) {
-    Metadata* metadata = (Metadata*)((address)SharedBaseAddress + offset_from_base_addr);
+  static Method* narrow_ptr_to_method(narrowPtr narrowp) {
+    Metadata* metadata = AOTCompressedPointers::decode_not_null<Metadata*>(narrowp);
     assert(metadata->is_method(), "sanity check");
     return (Method*)metadata;
   }
 
-  // Used during production run to convert a Method in AOTCache to offset from SharedBaseAddress
-  static uint convert_method_to_offset(Method* method);
+  // Used during production run to convert a Method in AOTCache to encoded pointer
+  static narrowPtr method_to_narrow_ptr(Method* method) {
+    assert(CDSConfig::is_using_archive() && !CDSConfig::is_dumping_final_static_archive(), "must be");
+    assert(AOTMetaspace::in_aot_cache(method), "method %p is not in AOTCache", method);
+    return AOTCompressedPointers::encode_address_in_cache(method);
+  }
 
   static int get_archived_object_permanent_index(oop obj) NOT_CDS_JAVA_HEAP_RETURN_(-1);
   static oop get_archived_object(int permanent_index) NOT_CDS_JAVA_HEAP_RETURN_(nullptr);

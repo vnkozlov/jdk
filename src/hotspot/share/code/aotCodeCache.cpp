@@ -25,6 +25,7 @@
 
 #include "asm/macroAssembler.hpp"
 #include "cds/aotCacheAccess.hpp"
+#include "cds/aotCompressedPointers.hpp"
 #include "cds/aotMetaspace.hpp"
 #include "cds/cds_globals.hpp"
 #include "cds/cdsConfig.hpp"
@@ -958,7 +959,7 @@ AOTCodeEntry* AOTCodeCache::find_code_entry(const methodHandle& method, uint com
   }
   TraceTime t1("Total time to find AOT code", &_t_totalFind, enable_timers(), false);
   if (is_on() && _cache->cache_buffer() != nullptr) {
-    uint id = AOTCacheAccess::convert_method_to_offset(method());
+    uint id = (uint)cast_to_u4(AOTCacheAccess::method_to_narrow_ptr(method()));
     AOTCodeEntry* entry = _cache->find_entry(AOTCodeEntry::Nmethod, id, comp_level);
     if (entry == nullptr) {
       LogStreamHandle(Info, aot, codecache, nmethod) log;
@@ -995,7 +996,7 @@ AOTCodeEntry* AOTCodeCache::find_code_entry(const methodHandle& method, uint com
 Method* AOTCodeEntry::method() {
   assert(_kind == Nmethod, "invalid kind %d", _kind);
   assert(AOTCodeCache::is_on_for_use(), "must be");
-  return AOTCacheAccess::convert_offset_to_method(_id);
+  return AOTCacheAccess::narrow_ptr_to_method(cast_from_u4(_id));
 }
 
 void* AOTCodeEntry::operator new(size_t x, AOTCodeCache* cache) {
@@ -2108,7 +2109,7 @@ AOTCodeEntry* AOTCodeCache::write_nmethod(nmethod* nm, bool for_preload) {
       return nullptr;
     }
   }
-  id = AOTCacheAccess::delta_from_base_address((address)nm->method());
+  id = (uint)cast_to_u4(AOTCacheAccess::to_narrow_ptr(nm->method()));
 
   // Write nmethod's code blob
   if (!cache->align_write()) {
@@ -2224,7 +2225,7 @@ bool AOTCodeCache::load_nmethod(ciEnv* env, ciMethod* target, int entry_bci, Abs
     ResourceMark rm;
     methodHandle method(THREAD, target->get_Method());
     const char* target_name = method->name_and_sig_as_C_string();
-    uint id = AOTCacheAccess::convert_method_to_offset(method());
+    uint id = (uint)cast_to_u4(AOTCacheAccess::method_to_narrow_ptr(method()));
     bool clinit_brs = entry->has_clinit_barriers();
     log_info(aot, codecache, nmethod)("%d (L%d): %s nmethod '%s' (id: " UINT32_FORMAT_X_0 "%s)",
                                       task->compile_id(), task->comp_level(), (preload ? "Preloading" : "Reading"),
@@ -2797,13 +2798,13 @@ bool AOTCodeCache::write_method(Method* method) {
     if (n != sizeof(int)) {
       return false;
     }
-    uint method_offset = AOTCacheAccess::delta_from_base_address((address)method);
-    n = write_bytes(&method_offset, sizeof(uint));
-    if (n != sizeof(uint)) {
+    narrowPtr method_narrow_ptr = AOTCacheAccess::to_narrow_ptr(method);
+    n = write_bytes(&method_narrow_ptr, sizeof(narrowPtr));
+    if (n != sizeof(narrowPtr)) {
       return false;
     }
     log_debug(aot, codecache, metadata)("%d (L%d): Wrote method: %s @ 0x%08x",
-             compile_id(), comp_level(), method->name_and_sig_as_C_string(), method_offset);
+             compile_id(), comp_level(), method->name_and_sig_as_C_string(), cast_to_u4(method_narrow_ptr));
     return true;
   }
   log_debug(aot, codecache, metadata)("%d (L%d): Method is not archived: %s",
@@ -2814,10 +2815,10 @@ bool AOTCodeCache::write_method(Method* method) {
 
 Method* AOTCodeReader::read_method(const methodHandle& comp_method) {
   uint code_offset = read_position();
-  uint method_offset = *(uint*)addr(code_offset);
+  narrowPtr method_narrow_ptr = *(narrowPtr*)addr(code_offset);
   code_offset += sizeof(uint);
   set_read_position(code_offset);
-  Method* m = AOTCacheAccess::convert_offset_to_method(method_offset);
+  Method* m = AOTCacheAccess::narrow_ptr_to_method(method_narrow_ptr);
   if (!AOTMetaspace::in_aot_cache((address)m)) {
     // Something changed in CDS
     set_lookup_failed();
@@ -2881,15 +2882,15 @@ bool AOTCodeCache::write_klass(Klass* klass) {
     if (n != sizeof(int)) {
       return false;
     }
-    uint klass_offset = AOTCacheAccess::delta_from_base_address((address)klass);
-    n = write_bytes(&klass_offset, sizeof(uint));
-    if (n != sizeof(uint)) {
+    narrowPtr klass_narrow_ptr = AOTCacheAccess::to_narrow_ptr(klass);
+    n = write_bytes(&klass_narrow_ptr, sizeof(narrowPtr));
+    if (n != sizeof(narrowPtr)) {
       return false;
     }
     log_debug(aot, codecache, metadata)("%d (L%d): Registered klass: %s%s%s @ 0x%08x",
              compile_id(), comp_level(), klass->external_name(),
              (!klass->is_instance_klass() ? "" : (init_state == 1 ? " (initialized)" : " (not-initialized)")),
-             (array_dim > 0 ? " (object array)" : ""), klass_offset);
+             (array_dim > 0 ? " (object array)" : ""), cast_to_u4(klass_narrow_ptr));
     return true;
   }
   log_debug(aot, codecache, metadata)("%d (L%d): Klassis not archived: %s%s%s",
@@ -2906,10 +2907,10 @@ Klass* AOTCodeReader::read_klass(const methodHandle& comp_method) {
   uint init_state = (state  & 1);
   uint array_dim  = (state >> 1);
   code_offset += sizeof(int);
-  uint klass_offset = *(uint*)addr(code_offset);
+  narrowPtr klass_narrow_ptr = *(narrowPtr*)addr(code_offset);
   code_offset += sizeof(uint);
   set_read_position(code_offset);
-  Klass* k = AOTCacheAccess::convert_offset_to_klass(klass_offset);
+  Klass* k = AOTCacheAccess::narrow_ptr_to_klass(klass_narrow_ptr);
   if (!AOTMetaspace::in_aot_cache((address)k)) {
     // Something changed in CDS
     set_lookup_failed();

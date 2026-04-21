@@ -23,7 +23,6 @@
  */
 
 #include "cds/aotCacheAccess.hpp"
-#include "cds/aotMetaspace.hpp"
 #include "cds/archiveBuilder.hpp"
 #include "cds/cdsConfig.hpp"
 #include "cds/filemap.hpp"
@@ -56,21 +55,6 @@ bool AOTCacheAccess::can_generate_aot_code_for(InstanceKlass* ik) {
     return false;
   }
   return true;
-}
-
-uint AOTCacheAccess::delta_from_base_address(address addr) {
-  assert(CDSConfig::is_dumping_final_static_archive(), "must be");
-  assert(ArchiveBuilder::is_active(), "must be");
-  ArchiveBuilder* builder = ArchiveBuilder::current();
-  address requested_addr = builder->to_requested(builder->get_buffered_addr(addr));
-  return (uint)pointer_delta(requested_addr, (address)AOTMetaspace::requested_base_address(), 1);
-}
-
-uint AOTCacheAccess::convert_method_to_offset(Method* method) {
-  assert(CDSConfig::is_using_archive() && !CDSConfig::is_dumping_final_static_archive(), "must be");
-  assert(AOTMetaspace::in_aot_cache(method), "method %p is not in AOTCache", method);
-  uint offset = (uint)pointer_delta((address)method, (address)SharedBaseAddress, 1);
-  return offset;
 }
 
 #if INCLUDE_CDS_JAVA_HEAP
