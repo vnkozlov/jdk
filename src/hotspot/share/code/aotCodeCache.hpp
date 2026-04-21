@@ -113,34 +113,6 @@ private:
   uint   _num_inlined_bytecodes;
   uint   _inline_instructions_size; // size from training run
 public:
-  // this constructor is used only by AOTCodeEntry::Stub
-  AOTCodeEntry(uint offset, uint size, uint name_offset, uint name_size,
-               uint code_offset, uint code_size,
-               Kind kind, uint id) {
-    assert(is_blob(kind), "sanity check");
-    _kind         = kind;
-
-    _for_preload  = false;
-    _has_clinit_barriers = false;
-    _has_oop_maps = false; // unused here
-    _loaded       = false;
-    _load_fail    = false;
-    _not_entrant  = false;
-
-    _id           = id;
-    _offset       = offset;
-    _size         = size;
-    _name_offset  = name_offset;
-    _name_size    = name_size;
-    _code_offset  = code_offset;
-    _code_size    = code_size;
-
-    _comp_level   = 0;
-    _comp_id      = 0;
-    _num_inlined_bytecodes = 0;
-    _inline_instructions_size = 0;
-  }
-
   AOTCodeEntry(Kind kind,         uint id,
                uint offset,       uint size,
                uint name_offset,  uint name_size,
@@ -351,7 +323,7 @@ private:
 public:
   AOTStubData(BlobId blob_id) NOT_CDS({});
 
-  ~AOTStubData()    CDS_ONLY({FREE_C_HEAP_ARRAY(StubAddrRange, _ranges);}) NOT_CDS({})
+  ~AOTStubData()    CDS_ONLY({FREE_C_HEAP_ARRAY(_ranges);}) NOT_CDS({})
 
   bool is_open()    CDS_ONLY({ return (_flags & OPEN) != 0; }) NOT_CDS_RETURN_(false);
   bool is_using()   CDS_ONLY({ return (_flags & USING) != 0; }) NOT_CDS_RETURN_(false);
@@ -630,7 +602,8 @@ private:
 
   bool set_write_position(uint pos);
   bool align_write();
-
+  bool align_write_int();
+  bool align_write_bytes(uint alignment);
   address reserve_bytes(uint nbytes);
   uint write_bytes(const void* buffer, uint nbytes);
   const char* addr(uint offset) const { return _load_buffer + offset; }
@@ -837,6 +810,7 @@ private:
   uint  _read_position;        // Position in _load_buffer
   uint  read_position() const { return _read_position; }
   void  set_read_position(uint pos);
+  uint  align_read_int();
 
   // convenience method to convert offset in AOTCodeEntry data to its address
   const char* addr(uint offset) const { return _load_buffer + offset; }

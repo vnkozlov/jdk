@@ -2592,7 +2592,6 @@ void CompileBroker::invoke_compiler_on_method(CompileTask* task) {
   }
 
   task->mark_finished(os::elapsed_counter());
-  DirectivesStack::release(directive);
 
   methodHandle method(thread, task->method());
 
@@ -2600,10 +2599,11 @@ void CompileBroker::invoke_compiler_on_method(CompileTask* task) {
 
   collect_statistics(thread, time, task);
 
-  if (PrintCompilation2) {
+  if (PrintCompilation2 || directive->PrintCompilation2Option) {
     ResourceMark rm;
     task->print_post(tty);
   }
+  DirectivesStack::release(directive);
 
   Log(compilation, codecache) log;
   if (log.is_debug()) {

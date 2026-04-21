@@ -248,9 +248,9 @@ public:
   void         print_ul(const char* msg = nullptr);
   static void  print(outputStream* st, const nmethod* nm, const char* msg = nullptr, bool short_form = false, bool cr = true) {
     print_impl(st, nm->method(), nm->compile_id(), nm->comp_level(),
-                           nm->is_osr_method(), nm->is_osr_method() ? nm->osr_entry_bci() : -1, /*is_blocking*/ false,
-                           nm->is_aot(), nm->preloaded(),
-                           nm->compiler_name(), msg, short_form, cr);
+               nm->is_osr_method(), nm->is_osr_method() ? nm->osr_entry_bci() : -1, /*is_blocking*/ false,
+               nm->is_aot(), nm->preloaded(),
+               nm->compiler_name(), msg, short_form, cr);
   }
   static void  print_ul(const nmethod* nm, const char* msg = nullptr);
 

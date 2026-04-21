@@ -216,7 +216,7 @@ void CompileTask::print_impl(outputStream* st, Method* method, int compile_id, i
   // Use stringStream to avoid breaking the line
   stringStream sst;
   if (after_compile_details) {
-    {
+    { // Print current time
       stringStream ss;
       ss.print(UINT64_FORMAT, (uint64_t) tty->time_stamp().milliseconds());
       sst.print("%7s ", ss.freeze());
@@ -298,7 +298,7 @@ void CompileTask::print_impl(outputStream* st, Method* method, int compile_id, i
     sst.print("(method)");
   } else {
     if (after_compile_details) {
-      sst.print("%s", method->name_and_sig_as_C_string());
+      sst.print("%s", method->name_and_sig_as_C_string(true /* use_double_colon */));
     } else {
       method->print_short_name(&sst);
     }
