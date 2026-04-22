@@ -98,6 +98,7 @@
 #endif // COMPILER1
 #ifdef COMPILER2
 #include "opto/runtime.hpp"
+#include "opto/parse.hpp"
 #endif
 #if INCLUDE_JVMCI
 #include "jvmci/jvmci.hpp"
@@ -3597,6 +3598,7 @@ void AOTCodeAddressTable::init_extrs() {
     ADD_EXTERNAL_ADDRESS(OptoRuntime::vthread_start_final_transition_C);
     ADD_EXTERNAL_ADDRESS(OptoRuntime::vthread_start_transition_C);
     ADD_EXTERNAL_ADDRESS(OptoRuntime::vthread_end_transition_C);
+    ADD_EXTERNAL_ADDRESS(Parse::trap_stress_counter_address());
   }
 #endif // COMPILER2
 
