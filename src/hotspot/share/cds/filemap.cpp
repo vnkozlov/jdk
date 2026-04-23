@@ -1430,9 +1430,6 @@ void FileMapInfo::relocate_pointers_in_aot_code_region() {
   address ac_region_requested_base = core_regions_requested_base + r->mapping_offset();
   address ac_region_mapped_base = (address)r->mapped_base();
 
-  size_t max_bits_for_core_regions = pointer_delta(mapped_end(), mapped_base(), // FIXME - renamed to core_regions_mapped_base(), etc
-                                                   sizeof(address));
-
   CachedCodeRelocator patcher(ac_region_requested_base, ac_region_mapped_base,
                               core_regions_mapped_base - core_regions_requested_base);
   ac_ptrmap.iterate(&patcher);

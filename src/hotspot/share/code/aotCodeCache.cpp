@@ -97,8 +97,8 @@
 #include "gc/z/c1/zBarrierSetC1.hpp"
 #endif // COMPILER1
 #ifdef COMPILER2
-#include "opto/runtime.hpp"
 #include "opto/parse.hpp"
+#include "opto/runtime.hpp"
 #endif
 #if INCLUDE_JVMCI
 #include "jvmci/jvmci.hpp"

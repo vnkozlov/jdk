@@ -70,7 +70,6 @@ public:
         return CompLevel_limited_profile <= high_top_level && high_top_level <= CompLevel_full_profile;
       case CompLevel_full_profile:
         // We do not include C1 full profiled methods at this time.
-        // TODO: See if it is profitable to do so.
         return false;
       default:
         assert(false, "Missed the case: %d", _comp_level);

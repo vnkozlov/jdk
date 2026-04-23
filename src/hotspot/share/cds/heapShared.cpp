@@ -1396,7 +1396,6 @@ void HeapShared::initialize_java_lang_invoke(TRAPS) {
 }
 
 bool HeapShared::is_core_java_lang_invoke_klass(InstanceKlass* klass) {
-  // TODO: Crude, rewrite using Symbols or vmClasses instead
   ResourceMark rm;
   char* s2 = klass->name()->as_C_string();
   int len = sizeof(java_lang_invoke_core_klasses)/sizeof(char*);

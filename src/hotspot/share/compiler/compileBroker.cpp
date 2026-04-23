@@ -1670,7 +1670,7 @@ bool CompileBroker::compilation_is_complete(const methodHandle&        method,
                                             bool                       online_only,
                                             CompileTask::CompileReason compile_reason) {
   if (CompileTask::reason_is_aot_compile(compile_reason)) {
-    return false; // FIXME: any restrictions?
+    return false;
   }
   bool is_osr = (osr_bci != standard_entry_bci);
   if (is_osr) {

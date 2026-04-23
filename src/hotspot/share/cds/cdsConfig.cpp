@@ -130,8 +130,6 @@ void CDSConfig::ergo_initialize() {
   // than expected because it is unable to load the AOT code cache.
   //
   if (UseCompressedOops && AOTCodeCache::is_caching_enabled()) {
-    // UPDATE: disabled for performance - by default small Java heaps are used
-    // AOT code will be rejected if oops encoding does not match
     FLAG_SET_ERGO_IF_DEFAULT(UseCompatibleCompressedOops, true);
   } else {
     FLAG_SET_ERGO(UseCompatibleCompressedOops, false);
