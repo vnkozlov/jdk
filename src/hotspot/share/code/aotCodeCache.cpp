@@ -97,6 +97,7 @@
 #include "gc/z/c1/zBarrierSetC1.hpp"
 #endif // COMPILER1
 #ifdef COMPILER2
+#include "opto/c2_MacroAssembler.hpp"
 #include "opto/parse.hpp"
 #include "opto/runtime.hpp"
 #endif
@@ -3607,6 +3608,7 @@ void AOTCodeAddressTable::init_extrs() {
   ADD_EXTERNAL_ADDRESS(G1BarrierSetRuntime::write_ref_array_pre_narrow_oop_entry); // used by arraycopy stubs
   ADD_EXTERNAL_ADDRESS(G1BarrierSetRuntime::write_ref_array_pre_oop_entry); // used by arraycopy stubs
   ADD_EXTERNAL_ADDRESS(G1BarrierSetRuntime::write_ref_array_post_entry); // used by arraycopy stubs
+  ADD_EXTERNAL_ADDRESS(G1BarrierSetRuntime::clone_addr());
   ADD_EXTERNAL_ADDRESS(BarrierSetNMethod::nmethod_stub_entry_barrier); // used by method_entry_barrier
 #endif
 #if INCLUDE_SHENANDOAHGC
@@ -3648,6 +3650,10 @@ void AOTCodeAddressTable::init_extrs() {
 #if defined(AMD64) || defined(AARCH64) || defined(RISCV64)
   ADD_EXTERNAL_ADDRESS(MacroAssembler::debug64);
 #endif // defined(AMD64) || defined(AARCH64) || defined(RISCV64)
+#if defined(AMD64) || defined(AARCH64)
+  ADD_EXTERNAL_ADDRESS(C2_MacroAssembler::abort_verify_int_in_range);
+  ADD_EXTERNAL_ADDRESS(C2_MacroAssembler::abort_verify_long_in_range);
+#endif // defined(AMD64) || defined(AARCH64)
 #if defined(AMD64)
   ADD_EXTERNAL_ADDRESS(warning);
 #endif // defined(AMD64)
