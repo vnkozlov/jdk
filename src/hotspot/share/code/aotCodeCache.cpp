@@ -1271,6 +1271,7 @@ bool AOTCodeCache::finish_write() {
     }
 
     // Now write the data for preload AOTCodeEntry
+    current = align_up(current, DATA_ALIGNMENT);
     for (int i = 0; i < (int)preload_entries_cnt; i++) {
       AOTCodeEntry* entry = &preload_entries[i];
       uint size = align_up(entry->size(), DATA_ALIGNMENT);
@@ -1283,7 +1284,6 @@ bool AOTCodeCache::finish_write() {
     }
 
     // Store the rest of AOTCodeEntry
-    current = align_up(current, DATA_ALIGNMENT);
     uint entries_count = 0;
     uint new_entries_offset = current - start;
     AOTCodeEntry* code_entries = (AOTCodeEntry*)current;
@@ -1306,6 +1306,7 @@ bool AOTCodeCache::finish_write() {
     }
 
     // Now write the data for AOTCodeEntry
+    current = align_up(current, DATA_ALIGNMENT);
     for (int i = 0; i < (int)entries_count; i++) {
       AOTCodeEntry* entry = &code_entries[i];
       uint size = align_up(entry->size(), DATA_ALIGNMENT);
@@ -1331,6 +1332,7 @@ bool AOTCodeCache::finish_write() {
       current += strings_size;
     }
 
+    current = align_up(current, DATA_ALIGNMENT);
     uint search_table_offset = current - start;
     // Sort and store search table
     qsort(search, entries_count, 2*sizeof(uint), uint_cmp);
@@ -1883,7 +1885,7 @@ void AOTCodeReader::read_stub_data(CodeBlob* code_blob, AOTStubData* stub_data) 
   uint offset = align_read_int();
   LogStreamHandle(Trace, aot, codecache, stubs) log;
   if (log.is_enabled()) {
-    log.print_cr("======== Stub data starts at offset %d", offset);
+    log.print_cr("======== Stub data starts at offset %d", (offset - _entry->offset()));
   }
   // read stub and entries until we see NO_STUBID
   StubId stub_id = *(StubId*)addr(offset); offset += sizeof(StubId);

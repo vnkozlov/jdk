@@ -106,7 +106,6 @@ private:
   uint   _name_offset; // Method's or intrinsic name
   uint   _name_size;
   uint   _code_offset; // Start of code in cache
-  uint   _code_size;   // Total size of all code sections
 
   uint   _comp_level;  // compilation level
   uint   _comp_id;     // compilation id
@@ -136,7 +135,6 @@ public:
     _name_offset  = name_offset;
     _name_size    = name_size;
     _code_offset  = code_offset;
-    _code_size    = 0; // unused
 
     _comp_level   = comp_level;
     _comp_id      = comp_id;
@@ -160,7 +158,6 @@ public:
   uint name_offset()  const { return _name_offset; }
   uint name_size()    const { return _name_size; }
   uint code_offset()  const { return _code_offset; }
-  uint code_size()    const { return _code_size; }
 
   bool has_oop_maps() const { return _has_oop_maps; }
   uint num_inlined_bytecodes() const { return _num_inlined_bytecodes; }
