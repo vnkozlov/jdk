@@ -3601,59 +3601,65 @@ void AOTCodeAddressTable::init_extrs() {
     ADD_EXTERNAL_ADDRESS(OptoRuntime::vthread_end_transition_C);
     ADD_EXTERNAL_ADDRESS(Parse::trap_stress_counter_address());
   }
+#if defined(AMD64) || defined(AARCH64)
+  ADD_EXTERNAL_ADDRESS(C2_MacroAssembler::abort_verify_int_in_range);
+  ADD_EXTERNAL_ADDRESS(C2_MacroAssembler::abort_verify_long_in_range);
+#endif // defined(AMD64) || defined(AARCH64)
 #endif // COMPILER2
 
-#if INCLUDE_G1GC
-  ADD_EXTERNAL_ADDRESS(G1BarrierSetRuntime::write_ref_field_pre_entry);
-  ADD_EXTERNAL_ADDRESS(G1BarrierSetRuntime::write_ref_array_pre_narrow_oop_entry); // used by arraycopy stubs
-  ADD_EXTERNAL_ADDRESS(G1BarrierSetRuntime::write_ref_array_pre_oop_entry); // used by arraycopy stubs
-  ADD_EXTERNAL_ADDRESS(G1BarrierSetRuntime::write_ref_array_post_entry); // used by arraycopy stubs
-  ADD_EXTERNAL_ADDRESS(G1BarrierSetRuntime::clone_addr());
   ADD_EXTERNAL_ADDRESS(BarrierSetNMethod::nmethod_stub_entry_barrier); // used by method_entry_barrier
+#if INCLUDE_G1GC
+  if (UseG1GC) {
+    ADD_EXTERNAL_ADDRESS(G1BarrierSetRuntime::write_ref_field_pre_entry);
+    ADD_EXTERNAL_ADDRESS(G1BarrierSetRuntime::write_ref_array_pre_narrow_oop_entry); // used by arraycopy stubs
+    ADD_EXTERNAL_ADDRESS(G1BarrierSetRuntime::write_ref_array_pre_oop_entry); // used by arraycopy stubs
+    ADD_EXTERNAL_ADDRESS(G1BarrierSetRuntime::write_ref_array_post_entry); // used by arraycopy stubs
+    ADD_EXTERNAL_ADDRESS(G1BarrierSetRuntime::clone_addr());
+  }
 #endif
 #if INCLUDE_SHENANDOAHGC
-  ADD_EXTERNAL_ADDRESS(ShenandoahRuntime::write_barrier_pre);
-  ADD_EXTERNAL_ADDRESS(ShenandoahRuntime::load_reference_barrier_strong);
-  ADD_EXTERNAL_ADDRESS(ShenandoahRuntime::load_reference_barrier_strong_narrow);
-  ADD_EXTERNAL_ADDRESS(ShenandoahRuntime::load_reference_barrier_weak);
-  ADD_EXTERNAL_ADDRESS(ShenandoahRuntime::load_reference_barrier_weak_narrow);
-  ADD_EXTERNAL_ADDRESS(ShenandoahRuntime::load_reference_barrier_phantom);
-  ADD_EXTERNAL_ADDRESS(ShenandoahRuntime::load_reference_barrier_phantom_narrow);
-  ADD_EXTERNAL_ADDRESS(ShenandoahRuntime::arraycopy_barrier_oop);
-  ADD_EXTERNAL_ADDRESS(ShenandoahRuntime::arraycopy_barrier_narrow_oop);
-  ADD_EXTERNAL_ADDRESS(ShenandoahRuntime::clone_barrier);
+  if (UseShenandoahGC) {
+    ADD_EXTERNAL_ADDRESS(ShenandoahRuntime::write_barrier_pre);
+    ADD_EXTERNAL_ADDRESS(ShenandoahRuntime::load_reference_barrier_strong);
+    ADD_EXTERNAL_ADDRESS(ShenandoahRuntime::load_reference_barrier_strong_narrow);
+    ADD_EXTERNAL_ADDRESS(ShenandoahRuntime::load_reference_barrier_weak);
+    ADD_EXTERNAL_ADDRESS(ShenandoahRuntime::load_reference_barrier_weak_narrow);
+    ADD_EXTERNAL_ADDRESS(ShenandoahRuntime::load_reference_barrier_phantom);
+    ADD_EXTERNAL_ADDRESS(ShenandoahRuntime::load_reference_barrier_phantom_narrow);
+    ADD_EXTERNAL_ADDRESS(ShenandoahRuntime::arraycopy_barrier_oop);
+    ADD_EXTERNAL_ADDRESS(ShenandoahRuntime::arraycopy_barrier_narrow_oop);
+    ADD_EXTERNAL_ADDRESS(ShenandoahRuntime::clone_barrier);
+  }
 #endif
 #if INCLUDE_ZGC
-  ADD_EXTERNAL_ADDRESS(ZBarrierSetRuntime::load_barrier_on_oop_field_preloaded_addr());
-  ADD_EXTERNAL_ADDRESS(ZBarrierSetRuntime::load_barrier_on_oop_field_preloaded_store_good_addr());
-  ADD_EXTERNAL_ADDRESS(ZBarrierSetRuntime::load_barrier_on_weak_oop_field_preloaded_addr());
-  ADD_EXTERNAL_ADDRESS(ZBarrierSetRuntime::load_barrier_on_phantom_oop_field_preloaded_addr());
-  ADD_EXTERNAL_ADDRESS(ZBarrierSetRuntime::no_keepalive_load_barrier_on_weak_oop_field_preloaded_addr());
-  ADD_EXTERNAL_ADDRESS(ZBarrierSetRuntime::no_keepalive_load_barrier_on_phantom_oop_field_preloaded_addr());
-  ADD_EXTERNAL_ADDRESS(ZBarrierSetRuntime::store_barrier_on_oop_field_with_healing_addr());
-  ADD_EXTERNAL_ADDRESS(ZBarrierSetRuntime::store_barrier_on_oop_field_without_healing_addr());
-  ADD_EXTERNAL_ADDRESS(ZBarrierSetRuntime::no_keepalive_store_barrier_on_oop_field_without_healing_addr());
-  ADD_EXTERNAL_ADDRESS(ZBarrierSetRuntime::store_barrier_on_native_oop_field_without_healing_addr());
-  ADD_EXTERNAL_ADDRESS(ZBarrierSetRuntime::load_barrier_on_oop_array_addr());
-  ADD_EXTERNAL_ADDRESS(ZBarrierSetRuntime::clone_addr());
+  if (UseZGC) {
+    ADD_EXTERNAL_ADDRESS(ZBarrierSetRuntime::load_barrier_on_oop_field_preloaded_addr());
+    ADD_EXTERNAL_ADDRESS(ZBarrierSetRuntime::load_barrier_on_oop_field_preloaded_store_good_addr());
+    ADD_EXTERNAL_ADDRESS(ZBarrierSetRuntime::load_barrier_on_weak_oop_field_preloaded_addr());
+    ADD_EXTERNAL_ADDRESS(ZBarrierSetRuntime::load_barrier_on_phantom_oop_field_preloaded_addr());
+    ADD_EXTERNAL_ADDRESS(ZBarrierSetRuntime::no_keepalive_load_barrier_on_weak_oop_field_preloaded_addr());
+    ADD_EXTERNAL_ADDRESS(ZBarrierSetRuntime::no_keepalive_load_barrier_on_phantom_oop_field_preloaded_addr());
+    ADD_EXTERNAL_ADDRESS(ZBarrierSetRuntime::store_barrier_on_oop_field_with_healing_addr());
+    ADD_EXTERNAL_ADDRESS(ZBarrierSetRuntime::store_barrier_on_oop_field_without_healing_addr());
+    ADD_EXTERNAL_ADDRESS(ZBarrierSetRuntime::no_keepalive_store_barrier_on_oop_field_without_healing_addr());
+    ADD_EXTERNAL_ADDRESS(ZBarrierSetRuntime::store_barrier_on_native_oop_field_without_healing_addr());
+    ADD_EXTERNAL_ADDRESS(ZBarrierSetRuntime::load_barrier_on_oop_array_addr());
+    ADD_EXTERNAL_ADDRESS(ZBarrierSetRuntime::clone_addr());
 
-  ADD_EXTERNAL_ADDRESS(ZPointerVectorLoadBadMask);
-  ADD_EXTERNAL_ADDRESS(ZPointerVectorStoreBadMask);
-  ADD_EXTERNAL_ADDRESS(ZPointerVectorStoreGoodMask);
+    ADD_EXTERNAL_ADDRESS(ZPointerVectorLoadBadMask);
+    ADD_EXTERNAL_ADDRESS(ZPointerVectorStoreBadMask);
+    ADD_EXTERNAL_ADDRESS(ZPointerVectorStoreGoodMask);
 #if defined(AMD64)
-  ADD_EXTERNAL_ADDRESS(&ZPointerLoadShift);
-  ADD_EXTERNAL_ADDRESS(&ZPointerLoadShiftTable);
+    ADD_EXTERNAL_ADDRESS(&ZPointerLoadShift);
+    ADD_EXTERNAL_ADDRESS(&ZPointerLoadShiftTable);
 #endif
+  } // UseZGC
 #endif // INCLUDE_ZGC
 
 #ifndef ZERO
 #if defined(AMD64) || defined(AARCH64) || defined(RISCV64)
   ADD_EXTERNAL_ADDRESS(MacroAssembler::debug64);
 #endif // defined(AMD64) || defined(AARCH64) || defined(RISCV64)
-#if defined(AMD64) || defined(AARCH64)
-  ADD_EXTERNAL_ADDRESS(C2_MacroAssembler::abort_verify_int_in_range);
-  ADD_EXTERNAL_ADDRESS(C2_MacroAssembler::abort_verify_long_in_range);
-#endif // defined(AMD64) || defined(AARCH64)
 #if defined(AMD64)
   ADD_EXTERNAL_ADDRESS(warning);
 #endif // defined(AMD64)
