@@ -444,13 +444,6 @@ public:
 #define AOTCODECACHE_DECLARE_VAR(type, name) type _saved_ ## name;
 #define AOTCODECACHE_DECLARE_FUN(type, name, func) type _saved_ ## name;
 
-struct AOTCodeSection {
-public:
-  address _origin_address;
-  uint _size;
-  uint _offset;
-};
-
 enum class DataKind: int {
   No_Data   = -1,
   Null      = 0,
@@ -789,7 +782,6 @@ public:
   // It is used before AOTCodeCache is initialized.
   static bool maybe_dumping_code() NOT_CDS_RETURN_(false);
 
-  static bool allow_const_field(ciConstant& value) NOT_CDS_RETURN_(true);
   static void invalidate(AOTCodeEntry* entry) NOT_CDS_RETURN;
   static AOTCodeEntry* find_code_entry(const methodHandle& method, uint comp_level) NOT_CDS_RETURN_(nullptr);
   static void preload_code(JavaThread* thread) NOT_CDS_RETURN;

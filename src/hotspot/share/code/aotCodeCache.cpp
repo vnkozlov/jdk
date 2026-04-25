@@ -280,12 +280,6 @@ bool AOTCodeCache::is_code_load_thread_on() {
   return UseAOTCodeLoadThread && AOTCodeCaching;
 }
 
-bool AOTCodeCache::allow_const_field(ciConstant& value) {
-  ciEnv* env = CURRENT_ENV;
-  precond(env != nullptr); // This method should be called only from CI
-  return !env->is_aot_compile(); // Restrict only when we generate AOT code
-}
-
 // It is called from AOTMetaspace::initialize_shared_spaces()
 // which is called from universe_init().
 // At this point all AOT class linking seetings are finilized
@@ -318,10 +312,6 @@ void AOTCodeCache::initialize() {
     is_dumping = is_caching_enabled();
   } else if (CDSConfig::is_using_archive() && CDSConfig::is_using_aot_linked_classes()) {
     is_using = is_caching_enabled();
-  }
-  if (ClassInitBarrierMode > 0 && !(is_dumping && AOTCodeCaching)) {
-    log_info(aot, codecache, init)("Set ClassInitBarrierMode to 0 because AOT Code dumping is off");
-    FLAG_SET_ERGO(ClassInitBarrierMode, 0);
   }
   if (!(is_dumping || is_using)) {
     load_info_log().print_cr("AOT Code Cache is not used: AOT Class Linking is not used");
@@ -395,6 +385,9 @@ void AOTCodeCache::init2() {
   if (is_dumping_code()) {
     FLAG_SET_ERGO_IF_DEFAULT(ClassInitBarrierMode, 1);
   } else {
+    if (ClassInitBarrierMode > 0) {
+      log_info(aot, codecache, init)("Set ClassInitBarrierMode to 0 because AOT Code caching is off");
+    }
     FLAG_SET_ERGO(ClassInitBarrierMode, 0);
   }
 }
@@ -1093,16 +1086,6 @@ void AOTCodeCache::invalidate_entry(AOTCodeEntry* entry) {
   }
 #ifdef ASSERT
   assert(_load_entries != nullptr, "sanity");
-  {
-    uint name_offset = entry->offset() + entry->name_offset();
-    const char* name = _load_buffer + name_offset;;
-    uint level       = entry->comp_level();
-    uint comp_id     = entry->comp_id();
-    bool for_preload = entry->for_preload();
-    bool clinit_brs  = entry->has_clinit_barriers();
-    log_info(aot, codecache, nmethod)("Invalidating entry for '%s' (comp_id %d, comp_level %d, hash: " UINT32_FORMAT_X_0 "%s%s)",
-                                      name, comp_id, level, entry->id(), (for_preload ? "P" : "A"), (clinit_brs ? ", has clinit barriers" : ""));
-  }
   assert(entry->is_loaded() || entry->for_preload(), "invalidate only AOT code in use or a preload code");
   bool found = false;
   uint i = 0;
@@ -1141,7 +1124,6 @@ void AOTCodeCache::invalidate_entry(AOTCodeEntry* entry) {
     // most likely because some dependencies changed during run.
     // We can still use normal AOT code if preload code is
     // invalidated - normal AOT code has less restrictions.
-    Method* method = entry->method();
     MethodCounters* mc = entry->method()->method_counters();
     if (mc != nullptr && mc->aot_preload_code_entry() != nullptr) {
       AOTCodeEntry* preload_entry = mc->aot_preload_code_entry();
@@ -1158,11 +1140,9 @@ const int AOTCompLevel_count = CompLevel_count + 1; // 6 levels indexed from 0 t
 
 struct AOTCodeEntryStats {
 private:
-  struct CodeStats {
-    uint _kind_cnt[AOTCodeEntry::Kind_count];
-    uint _nmethod_cnt[AOTCompLevel_count];
-    uint _clinit_barriers_cnt;
-  } ccstats; // AOT code stats
+  uint _kind_cnt[AOTCodeEntry::Kind_count];
+  uint _nmethod_cnt[AOTCompLevel_count];
+  uint _clinit_barriers_cnt;
 
 public:
   static void check_kind(uint kind) {
@@ -1172,12 +1152,12 @@ public:
     assert(lvl > CompLevel_none && lvl < AOTCompLevel_count, "Invalid compilation level %d", lvl);
   }
 
-  void inc_entry_cnt(uint kind) { check_kind(kind); ccstats._kind_cnt[kind] += 1; }
-  void inc_nmethod_cnt(uint lvl) { check_complevel(lvl); ccstats._nmethod_cnt[lvl] += 1; }
-  void inc_clinit_barriers_cnt() { ccstats._clinit_barriers_cnt += 1; }
+  void inc_entry_cnt(uint kind)  { check_kind(kind); _kind_cnt[kind] += 1; }
+  void inc_nmethod_cnt(uint lvl) { check_complevel(lvl); _nmethod_cnt[lvl] += 1; }
+  void inc_clinit_barriers_cnt() { _clinit_barriers_cnt += 1; }
 
   AOTCodeEntryStats() {
-    memset(&ccstats, 0, sizeof(CodeStats));
+    memset(this, 0, sizeof(AOTCodeEntryStats));
   }
 
   void collect_entry_stats(AOTCodeEntry* entry) {
@@ -1191,9 +1171,9 @@ public:
     }
   }
 
-  uint entry_count(uint kind) { check_kind(kind); return ccstats._kind_cnt[kind]; }
-  uint nmethod_count(uint lvl) { check_complevel(lvl); return ccstats._nmethod_cnt[lvl]; }
-  uint clinit_barriers_count() { return ccstats._clinit_barriers_cnt; }
+  uint entry_count(uint kind) { check_kind(kind); return _kind_cnt[kind]; }
+  uint nmethod_count(uint lvl) { check_complevel(lvl); return _nmethod_cnt[lvl]; }
+  uint clinit_barriers_count() { return _clinit_barriers_cnt; }
 };
 
 static int uint_cmp(const void *i, const void *j) {
@@ -4029,16 +4009,9 @@ int AOTCodeAddressTable::id_for_address(address addr, RelocIterator reloc, CodeB
 
 #undef _extrs_max
 #undef _stubs_max
-#undef _shared_blobs_max
-#undef _C1_blobs_max
-#undef _C2_blobs_max
-#undef _blobs_max
 #undef _extrs_base
 #undef _stubs_base
-#undef _shared_blobs_base
-#undef _C1_blobs_base
-#undef _C2_blobs_base
-#undef _blobs_end
+#undef _all_max
 
 AOTRuntimeConstants AOTRuntimeConstants::_aot_runtime_constants;
 
@@ -4331,15 +4304,12 @@ void AOTCodeCache::log_stats_on_exit(AOTCodeEntryStats& stats) {
 
 struct AOTCodeStats {
 private:
-  struct RTStats {
-    struct {
-      uint _loaded_cnt;
-      uint _invalidated_cnt;
-      uint _load_failed_cnt;
-    } _entry_kinds[AOTCodeEntry::Kind_count],
-
+  struct {
+    uint _loaded_cnt;
+    uint _invalidated_cnt;
+    uint _load_failed_cnt;
+  } _entry_kinds[AOTCodeEntry::Kind_count],
     _nmethods[AOTCompLevel_count];
-  } rs; // rs = runtime stats
 
   static void check_kind(uint kind) {
     AOTCodeEntryStats::check_kind(kind);
@@ -4347,13 +4317,13 @@ private:
   static void check_complevel(uint lvl) {
     AOTCodeEntryStats::check_complevel(lvl);
   }
-  void inc_entry_loaded_cnt(uint kind) { check_kind(kind); rs._entry_kinds[kind]._loaded_cnt += 1; }
-  void inc_entry_invalidated_cnt(uint kind) { check_kind(kind); rs._entry_kinds[kind]._invalidated_cnt += 1; }
-  void inc_entry_load_failed_cnt(uint kind) { check_kind(kind); rs._entry_kinds[kind]._load_failed_cnt += 1; }
+  void inc_entry_loaded_cnt(uint kind)      { check_kind(kind); _entry_kinds[kind]._loaded_cnt += 1; }
+  void inc_entry_invalidated_cnt(uint kind) { check_kind(kind); _entry_kinds[kind]._invalidated_cnt += 1; }
+  void inc_entry_load_failed_cnt(uint kind) { check_kind(kind); _entry_kinds[kind]._load_failed_cnt += 1; }
 
-  void inc_nmethod_loaded_cnt(uint lvl) { check_complevel(lvl); rs._nmethods[lvl]._loaded_cnt += 1; }
-  void inc_nmethod_invalidated_cnt(uint lvl) { check_complevel(lvl); rs._nmethods[lvl]._invalidated_cnt += 1; }
-  void inc_nmethod_load_failed_cnt(uint lvl) { check_complevel(lvl); rs._nmethods[lvl]._load_failed_cnt += 1; }
+  void inc_nmethod_loaded_cnt(uint lvl)      { check_complevel(lvl); _nmethods[lvl]._loaded_cnt += 1; }
+  void inc_nmethod_invalidated_cnt(uint lvl) { check_complevel(lvl); _nmethods[lvl]._invalidated_cnt += 1; }
+  void inc_nmethod_load_failed_cnt(uint lvl) { check_complevel(lvl); _nmethods[lvl]._load_failed_cnt += 1; }
 
   void inc_loaded_cnt(AOTCodeEntry* entry) {
     inc_entry_loaded_cnt(entry->kind());
@@ -4380,7 +4350,7 @@ private:
   }
 public:
   AOTCodeStats() {
-    memset(&rs, 0, sizeof(RTStats));
+    memset(this, 0, sizeof(AOTCodeStats));
   }
   void collect_entry_runtime_stats(AOTCodeEntry* entry) {
     if (entry->is_loaded()) {
@@ -4394,13 +4364,13 @@ public:
     }
   }
 
-  uint entry_loaded_count(uint kind) { check_kind(kind); return rs._entry_kinds[kind]._loaded_cnt; }
-  uint entry_invalidated_count(uint kind) { check_kind(kind); return rs._entry_kinds[kind]._invalidated_cnt; }
-  uint entry_load_failed_count(uint kind) { check_kind(kind); return rs._entry_kinds[kind]._load_failed_cnt; }
+  uint entry_loaded_count(uint kind)      { check_kind(kind); return _entry_kinds[kind]._loaded_cnt; }
+  uint entry_invalidated_count(uint kind) { check_kind(kind); return _entry_kinds[kind]._invalidated_cnt; }
+  uint entry_load_failed_count(uint kind) { check_kind(kind); return _entry_kinds[kind]._load_failed_cnt; }
 
-  uint nmethod_loaded_count(uint lvl) { check_complevel(lvl); return rs._nmethods[lvl]._loaded_cnt; }
-  uint nmethod_invalidated_count(uint lvl) { check_complevel(lvl); return rs._nmethods[lvl]._invalidated_cnt; }
-  uint nmethod_load_failed_count(uint lvl) { check_complevel(lvl); return rs._nmethods[lvl]._load_failed_cnt; }
+  uint nmethod_loaded_count(uint lvl)      { check_complevel(lvl); return _nmethods[lvl]._loaded_cnt; }
+  uint nmethod_invalidated_count(uint lvl) { check_complevel(lvl); return _nmethods[lvl]._invalidated_cnt; }
+  uint nmethod_load_failed_count(uint lvl) { check_complevel(lvl); return _nmethods[lvl]._load_failed_cnt; }
 };
 
 static void print_helper(outputStream* st, const char* name, int count) {

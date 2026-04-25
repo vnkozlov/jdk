@@ -292,7 +292,7 @@ ciConstant ciField::constant_value() {
   if (FoldStableValues && is_stable() && _constant_value.is_null_or_zero()) {
     return ciConstant();
   }
-  if (!AOTCodeCache::allow_const_field(_constant_value)) {
+  if (CURRENT_ENV->is_aot_compile()) { // Restrict only when we generate AOT code
     return ciConstant();
   }
   return _constant_value;
@@ -308,7 +308,7 @@ ciConstant ciField::constant_value_of(ciObject* object) {
   if (FoldStableValues && is_stable() && field_value.is_null_or_zero()) {
     return ciConstant();
   }
-  if (!AOTCodeCache::allow_const_field(field_value)) {
+  if (CURRENT_ENV->is_aot_compile()) { // Restrict only when we generate AOT code
     return ciConstant();
   }
   return field_value;

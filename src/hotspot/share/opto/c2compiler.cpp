@@ -152,7 +152,7 @@ void C2Compiler::compile_method(ciEnv* env, ciMethod* target, int entry_bci, boo
   bool do_locks_coarsening = EliminateLocks;
   bool do_superword = UseSuperWord;
   bool for_preload = (task->compile_reason() == CompileTask::Reason_AOTCompileForPreload);
-  assert(!for_preload || (AOTCodeCache::is_dumping_code() && (ClassInitBarrierMode > 0)), "sanity");
+  assert(!for_preload || (ClassInitBarrierMode > 0), "sanity");
   while (!env->failing()) {
     ResourceMark rm;
     // Attempt to compile while subsuming loads into machine instructions.
