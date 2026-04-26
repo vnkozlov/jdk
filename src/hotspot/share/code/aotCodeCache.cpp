@@ -156,22 +156,25 @@ static bool enable_timers() {
   return CITime || log_is_enabled(Info, aot, codecache, stats);
 }
 
+// Report AOT code cache failure and exit VM
+// if (AOTMode is `on` and AbortVMOnAOTCodeFailure is default)
+//     or AbortVMOnAOTCodeFailure is `true`.
+//
+// Note, specifying -XX:-AbortVMOnAOTCodeFailure on command line
+// will prevent aborting VM when AOTMode is `on`. It is used for testing.
+
 static void report_load_failure() {
-  // (AOTMode=on and AbortVMOnAOTCodeFailure is default) or AbortVMOnAOTCodeFailure=true.
-  // Note, specifying -XX:-AbortVMOnAOTCodeFailure on command line will prevent aborting VM.
-  bool abort_vm = AbortVMOnAOTCodeFailure || (FLAG_IS_DEFAULT(AbortVMOnAOTCodeFailure) && RequireSharedSpaces);
+  bool abort_vm = AbortVMOnAOTCodeFailure ||
+                  (FLAG_IS_DEFAULT(AbortVMOnAOTCodeFailure) && RequireSharedSpaces);
   if (abort_vm) {
-    vm_exit_during_initialization("Unable to use AOT Code Cache", nullptr);
+    vm_exit_during_initialization("Unable to use AOT Code Cache.", nullptr);
   }
   load_failure_log().print_cr("Unable to use AOT Code Cache");
   AOTCodeCache::disable_caching();
 }
 
 static void report_store_failure() {
-  // (AOTMode=on and AbortVMOnAOTCodeFailure is default) or AbortVMOnAOTCodeFailure=true.
-  // Note, specifying -XX:-AbortVMOnAOTCodeFailure on command line will prevent aborting VM.
-  bool abort_vm = AbortVMOnAOTCodeFailure || (FLAG_IS_DEFAULT(AbortVMOnAOTCodeFailure) && RequireSharedSpaces);
-  if (abort_vm) {
+  if (AbortVMOnAOTCodeFailure) {
     tty->print_cr("Unable to create AOT Code Cache");
     vm_abort(false);
   }
@@ -643,25 +646,25 @@ bool AOTCodeCache::Config::verify_cpu_features(AOTCodeCache* cache) const {
     log.print_cr("CPU features recorded in AOTCodeCache: %s", ss.as_string());
   }
 
-  if (VM_Version::supports_features(cached_cpu_features_buffer)) {
-    if (log.is_enabled()) {
-      ResourceMark rm; // required for stringStream::as_string()
-      stringStream ss;
-      char* runtime_cpu_features = NEW_RESOURCE_ARRAY(char, VM_Version::cpu_features_size());
-      VM_Version::store_cpu_features(runtime_cpu_features);
-      VM_Version::get_missing_features_name(runtime_cpu_features, cached_cpu_features_buffer, ss);
-      if (!ss.is_empty()) {
-        log.print_cr("Additional runtime CPU features: %s", ss.as_string());
-      }
-    }
-  } else {
+  if (!VM_Version::verify_aot_code_cache_features(cached_cpu_features_buffer)) {
     if (load_failure_log().is_enabled()) {
       ResourceMark rm; // required for stringStream::as_string()
-      stringStream ss;
+      load_failure_log().print_cr("AOT Code Cache disabled: cpu features are incompatible");
       char* runtime_cpu_features = NEW_RESOURCE_ARRAY(char, VM_Version::cpu_features_size());
       VM_Version::store_cpu_features(runtime_cpu_features);
-      VM_Version::get_missing_features_name(cached_cpu_features_buffer, runtime_cpu_features, ss);
-      load_failure_log().print_cr("AOT Code Cache disabled: required cpu features are missing: %s", ss.as_string());
+
+      stringStream missing_features;
+      VM_Version::get_missing_features_name(cached_cpu_features_buffer, runtime_cpu_features, missing_features);
+      if (!missing_features.is_empty()) {
+        load_failure_log().print_cr("cpu features that are required: \"%s\"", missing_features.as_string());
+      }
+
+      stringStream additional_features;
+      VM_Version::get_missing_features_name(runtime_cpu_features, cached_cpu_features_buffer, additional_features);
+      if (!additional_features.is_empty()) {
+        load_failure_log().print("cpu features that are additional: \"%s\"", additional_features.as_string());
+      }
+      load_failure_log().print_cr("");
     }
     return false;
   }
