@@ -665,8 +665,8 @@ public:
   bool write_oop_map_set(CodeBlob& cb);
   bool write_nmethod_reloc_immediates(GrowableArray<Handle>& oop_list, GrowableArray<Metadata*>& metadata_list);
 
-  jobject read_oop(JavaThread* thread, const methodHandle& comp_method);
-  Metadata* read_metadata(const methodHandle& comp_method);
+  jobject read_oop(JavaThread* thread);
+  Metadata* read_metadata();
 
   bool write_oop(jobject& jo);
   bool write_oop(oop obj);
@@ -835,15 +835,15 @@ private:
   GrowableArray<Handle>*    _reloc_imm_oop_list;
   GrowableArray<Metadata*>* _reloc_imm_metadata_list;
 
-  Klass* read_klass(const methodHandle& comp_method);
-  Method* read_method(const methodHandle& comp_method);
+  Klass* read_klass();
+  Method* read_method();
 
-  oop read_oop(JavaThread* thread, const methodHandle& comp_method);
-  Metadata* read_metadata(const methodHandle& comp_method);
-  bool read_oops(OopRecorder* oop_recorder, ciMethod* target);
-  bool read_metadata(OopRecorder* oop_recorder, ciMethod* target);
+  oop read_oop(JavaThread* thread);
+  Metadata* read_metadata();
+  bool read_oops(OopRecorder* oop_recorder);
+  bool read_metadata(OopRecorder* oop_recorder);
 
-  bool read_oop_metadata_list(JavaThread* thread, ciMethod* target, GrowableArray<Handle> &oop_list, GrowableArray<Metadata*> &metadata_list, OopRecorder* oop_recorder);
+  bool read_oop_metadata_list(JavaThread* thread, GrowableArray<Handle> &oop_list, GrowableArray<Metadata*> &metadata_list, OopRecorder* oop_recorder);
   void apply_relocations(nmethod* nm, GrowableArray<Handle> &oop_list, GrowableArray<Metadata*> &metadata_list) NOT_CDS_RETURN;
 
   ImmutableOopMapSet* read_oop_map_set();

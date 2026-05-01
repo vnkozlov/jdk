@@ -1220,18 +1220,6 @@ nmethod* nmethod::new_nmethod(const methodHandle& method,
   }
   // Do verification and logging outside CodeCache_lock.
   if (nm != nullptr) {
-
-#ifdef ASSERT
-    LogTarget(Debug, aot, codecache, nmethod) log;
-    if (log.is_enabled()) {
-      LogStream out(log);
-      out.print_cr("== new_nmethod 2");
-      FlagSetting fs(PrintRelocations, true);
-      nm->print_on_impl(&out);
-      nm->decode(&out);
-    }
-#endif
-
     // Safepoints in nmethod::verify aren't allowed because nm hasn't been installed yet.
     DEBUG_ONLY(nm->verify();)
     nm->log_new_nmethod();
@@ -1277,16 +1265,6 @@ nmethod* nmethod::new_nmethod(nmethod* archived_nm,
   }
   // Do verification and logging outside CodeCache_lock.
   if (nm != nullptr) {
-#ifdef ASSERT
-    LogTarget(Debug, aot, codecache, nmethod) log;
-    if (log.is_enabled()) {
-      LogStream out(log);
-      out.print_cr("== new_nmethod 2");
-      FlagSetting fs(PrintRelocations, true);
-      nm->print_on_impl(&out);
-      nm->decode(&out);
-    }
-#endif
     // Safepoints in nmethod::verify aren't allowed because nm hasn't been installed yet.
     DEBUG_ONLY(nm->verify();)
     nm->log_new_nmethod();

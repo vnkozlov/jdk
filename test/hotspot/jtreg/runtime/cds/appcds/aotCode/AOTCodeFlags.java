@@ -265,27 +265,27 @@ public class AOTCodeFlags {
                     } else {
                         if (isAdapterCachingOn(aMode)) {
                             if (isAdapterCachingOn(pMode)) {
-                                out.shouldMatch("Read blob.*kind=Adapter.*");
+                                out.shouldMatch("Loaded blob.*kind=Adapter.*");
                             } else {
-                                out.shouldNotMatch("Read blob.*kind=Adapter.*");
+                                out.shouldNotMatch("Loaded blob.*kind=Adapter.*");
                             }
                         }
                         if (isStubCachingOn(aMode)) {
                             if (isStubCachingOn(pMode)) {
-                                out.shouldMatch("Read blob.*kind=SharedBlob.*");
-                                out.shouldMatch("Read blob.*kind=C1Blob.*");
-                                out.shouldMatch("Read blob.*kind=StubGenBlob.*");
+                                out.shouldMatch("Loaded blob.*kind=SharedBlob.*");
+                                out.shouldMatch("Loaded blob.*kind=C1Blob.*");
+                                out.shouldMatch("Loaded blob.*kind=StubGenBlob.*");
                             } else {
-                                out.shouldNotMatch("Read blob.*kind=SharedBlob.*");
-                                out.shouldNotMatch("Read blob.*kind=C1Blob.*");
-                                out.shouldNotMatch("Read blob.*kind=StubGenBlob.*");
+                                out.shouldNotMatch("Loaded blob.*kind=SharedBlob.*");
+                                out.shouldNotMatch("Loaded blob.*kind=C1Blob.*");
+                                out.shouldNotMatch("Loaded blob.*kind=StubGenBlob.*");
                             }
                         }
                         if (isCodeCachingOn(aMode)) {
                             if (isCodeCachingOn(pMode)) {
-                                out.shouldMatch("Read nmethod .*");
+                                out.shouldMatch("Loaded nmethod .*");
                             } else {
-                                out.shouldNotMatch("Read nmethod .*");
+                                out.shouldNotMatch("Loaded nmethod .*");
                             }
                         }
                     }

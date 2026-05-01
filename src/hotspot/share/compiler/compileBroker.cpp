@@ -808,7 +808,9 @@ void CompileBroker::compilation_init(JavaThread* THREAD) {
                                           CHECK);
   }
 
-  log_info(aot, codecache, init)("CompileBroker is initialized");
+  if (AOTCodeCache::is_on()) {
+    log_info(aot, codecache, init)("CompileBroker is initialized");
+  }
   _initialized = true;
 }
 
@@ -1276,7 +1278,7 @@ void CompileBroker::compile_method_base(const methodHandle& method,
     tty->cr();
   }
   LogStreamHandle(Debug, aot, codecache, compilation) log;
-  if (log.is_enabled()) {
+  if (log.is_enabled() && AOTCodeCache::is_using_code()) {
     ResourceMark rm;
     MethodTrainingData* mtd = MethodTrainingData::have_data() ? MethodTrainingData::find_fast(method) : nullptr;
     MethodCounters* mc = method->method_counters();

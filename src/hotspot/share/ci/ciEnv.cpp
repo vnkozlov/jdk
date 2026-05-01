@@ -1023,8 +1023,8 @@ bool ciEnv::is_compilation_valid(JavaThread* thread, ciMethod* target, bool inst
     validate_compile_task_dependencies(target);
     if (failing() && preload) {
       ResourceMark rm;
-      char *method_name = method->name_and_sig_as_C_string();
-      log_info(aot, codecache)("preload code for '%s' failed dependency check", method_name);
+      char* method_name = method->name_and_sig_as_C_string();
+      log_info(aot, codecache, nmethod)("preload code for '%s' failed dependency check", method_name);
     }
   }
 
@@ -1135,6 +1135,19 @@ nmethod* ciEnv::register_aot_method(JavaThread* thread,
     nm = nmethod::new_nmethod(archived_nm, method, compiler, aot_code_reader);
 
     if (nm != nullptr) {
+#ifdef ASSERT
+      LogStreamHandle(Trace, aot, codecache, nmethod) log;
+      if (log.is_enabled()) {
+        ResourceMark rm;
+        stringStream ss;
+        ss.print_cr("=== loaded AOT nmethod code ===");
+        FlagSetting fs(PrintRelocations, true);
+        nm->print_on_impl(&ss);
+        nm->decode(&ss);
+        ss.print_cr("===============================");
+        log.print_cr("%s", ss.freeze());
+      }
+#endif
       aot_code_entry->set_loaded();
       nm->set_has_clinit_barriers(aot_code_entry->has_clinit_barriers());
       make_code_usable(thread, target, preload, InvocationEntryBci, aot_code_entry, nm);
@@ -1226,6 +1239,19 @@ void ciEnv::register_method(ciMethod* target,
 
 #if INCLUDE_CDS
       if (task()->is_aot_compile()) {
+#ifdef ASSERT
+        LogStreamHandle(Trace, aot, codecache, nmethod) log;
+        if (log.is_enabled()) {
+          ResourceMark rm;
+          stringStream ss;
+          ss.print_cr("=== storing AOT nmethod code ===");
+          FlagSetting fs(PrintRelocations, true);
+          nm->print_on_impl(&ss);
+          nm->decode(&ss);
+          ss.print_cr("===============================");
+          log.print_cr("%s", ss.freeze());
+        }
+#endif
         AOTCodeEntry* aot_code_entry = AOTCodeCache::store_nmethod(nm, compiler, for_preload);
         if (aot_code_entry != nullptr) {
           nm->set_aot_code_entry(aot_code_entry);
