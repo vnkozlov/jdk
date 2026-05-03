@@ -27,6 +27,9 @@
  * @requires vm.gc != "Z"
  * @summary Sanity test of combinations of the AOT Code Caching diagnostic flags
  * @requires vm.cds.supports.aot.code.caching
+ * @requires vm.compMode != "Xcomp" & vm.compMode != "Xint"
+ * @comment It runs for long time (hours) with -Xcomp and AOT code caching enabled
+ *          on (virtual) machine with small number of cores
  * @requires vm.compiler1.enabled & vm.compiler2.enabled
  * @comment Both C1 and C2 JIT compilers are required because the test verifies
  *          compiler's runtime blobs generation.
@@ -46,6 +49,9 @@
  * @requires vm.gc.Z
  * @summary Sanity test of combinations of the AOT Code Caching diagnostic flags
  * @requires vm.cds.supports.aot.code.caching
+ * @requires vm.compMode != "Xcomp" & vm.compMode != "Xint"
+ * @comment It runs for long time (hours) with -Xcomp and AOT code caching enabled
+ *          on (virtual) machine with small number of cores
  * @requires vm.compiler1.enabled & vm.compiler2.enabled
  * @comment Both C1 and C2 JIT compilers are required because the test verifies
  *          compiler's runtime blobs generation.
@@ -65,6 +71,9 @@
  * @requires vm.gc.Shenandoah
  * @summary Sanity test of combinations of the AOT Code Caching diagnostic flags
  * @requires vm.cds.supports.aot.code.caching
+ * @requires vm.compMode != "Xcomp" & vm.compMode != "Xint"
+ * @comment It runs for long time (hours) with -Xcomp and AOT code caching enabled
+ *          on (virtual) machine with small number of cores
  * @requires vm.compiler1.enabled & vm.compiler2.enabled
  * @comment Both C1 and C2 JIT compilers are required because the test verifies
  *          compiler's runtime blobs generation.
@@ -84,6 +93,9 @@
  * @requires vm.gc.Parallel
  * @summary Sanity test of combinations of the AOT Code Caching diagnostic flags
  * @requires vm.cds.supports.aot.code.caching
+ * @requires vm.compMode != "Xcomp" & vm.compMode != "Xint"
+ * @comment It runs for long time (hours) with -Xcomp and AOT code caching enabled
+ *          on (virtual) machine with small number of cores
  * @requires vm.compiler1.enabled & vm.compiler2.enabled
  * @comment Both C1 and C2 JIT compilers are required because the test verifies
  *          compiler's runtime blobs generation.
@@ -200,7 +212,7 @@ public class AOTCodeFlags {
 
         @Override
         public String[] appCommandLine(RunMode runMode) {
-            return new String[] { "JavacBenchApp", "10" };
+            return new String[] { "JavacBenchApp", "1" };
         }
 
         @Override
