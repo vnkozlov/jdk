@@ -236,6 +236,9 @@ private:
     ciInstanceKlass* declared_holder = get_instance_klass_for_declared_method_holder(holder);
     return _factory->get_unloaded_method(declared_holder, name, signature, accessor);
   }
+  InstanceKlass::ClassState get_shared_init_state(uint id) {
+    return (InstanceKlass::ClassState)_factory->shared_init_state(id);
+  }
 
   // Get a ciKlass representing an unloaded klass.
   // Ensures uniqueness of the result.

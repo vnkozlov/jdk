@@ -48,6 +48,7 @@
 #include "gc/shared/collectedHeap.inline.hpp"
 #include "memory/allocation.inline.hpp"
 #include "memory/universe.hpp"
+#include "oops/instanceKlass.hpp"
 #include "oops/oop.inline.hpp"
 #include "oops/trainingData.hpp"
 #include "runtime/handles.inline.hpp"
@@ -83,6 +84,7 @@ ciObjectFactory::ciObjectFactory(Arena* arena,
                                  int expected_size)
                                  : _arena(arena),
                                    _ci_metadata(arena, expected_size, 0, nullptr),
+                                   _shared_init_state(arena, expected_size, 0, (u1)0),
                                    _unloaded_methods(arena, 4, 0, nullptr),
                                    _unloaded_klasses(arena, 8, 0, nullptr),
                                    _unloaded_instances(arena, 4, 0, nullptr),
@@ -97,6 +99,22 @@ ciObjectFactory::ciObjectFactory(Arena* arena,
   // If the shared ci objects exist append them to this factory's objects
   if (_shared_ci_metadata != nullptr) {
     _ci_metadata.appendAll(_shared_ci_metadata);
+    // ciInstanceKlass for well-known class is shared by all
+    // compiler threads and can be updated concurrently by
+    // other compiler threads during compilation.
+    // Make local copy of class state to avoid state change
+    // during compilation.
+    int len = _ci_metadata.length();
+    for (int i = 0; i < len; i++) {
+      ciMetadata* obj = _ci_metadata.at(i);
+      if (obj->is_loaded() && obj->is_instance_klass() &&
+          obj->as_instance_klass()->is_shared()) {
+        ciInstanceKlass* cik = obj->as_instance_klass();
+        u1 state = 0;
+        GUARDED_VM_ENTRY( state = (u1)cik->get_instanceKlass()->init_state(); )
+        _shared_init_state.at_put_grow(cik->ident(), state, 0);
+      }
+    }
   }
 }
 

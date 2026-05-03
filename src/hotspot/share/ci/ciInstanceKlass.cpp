@@ -137,10 +137,17 @@ ciInstanceKlass::ciInstanceKlass(ciSymbol* name,
 
 // ------------------------------------------------------------------
 // ciInstanceKlass::compute_shared_is_initialized
-void ciInstanceKlass::compute_shared_init_state() {
+InstanceKlass::ClassState ciInstanceKlass::compute_shared_init_state() {
   GUARDED_VM_ENTRY(
     InstanceKlass* ik = get_instanceKlass();
+    // Update state of shared instance to be used by next compilation
     _init_state = ik->init_state();
+    // But return its cached state for current compilation
+    ciEnv* env = CURRENT_ENV;
+    if (env != nullptr && env->task() != nullptr) {
+      return env->get_shared_init_state(ident());
+    }
+    return _init_state;
   )
 }
 
@@ -319,11 +326,11 @@ void ciInstanceKlass::print_impl(outputStream* st) {
               bool_to_str(has_subklass()),
               layout_helper());
 
-    _flags.print_klass_flags();
+    _flags.print_klass_flags(st);
 
     if (_super) {
       st->print(" super=");
-      _super->print_name();
+      _super->print_name_on(st);
     }
     if (_java_mirror) {
       st->print(" mirror=PRESENT");
