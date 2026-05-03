@@ -235,7 +235,7 @@ bool AOTCodeCache::maybe_dumping_code() {
 }
 
 // Next methods could be called regardless of AOT code cache status.
-// Initially they are called during AOT flags parsing and finilized
+// Initially they are called during AOT flags parsing and finalized
 // in AOTCodeCache::initialize().
 void AOTCodeCache::enable_caching() {
   FLAG_SET_ERGO_IF_DEFAULT(AOTCodeCaching, true);
@@ -286,7 +286,7 @@ bool AOTCodeCache::is_code_load_thread_on() {
 
 // It is called from AOTMetaspace::initialize_shared_spaces()
 // which is called from universe_init().
-// At this point all AOT class linking seetings are finilized
+// At this point all AOT class linking seetings are finalized
 // and AOT cache is open so we can map AOT code region.
 void AOTCodeCache::initialize() {
   if (!is_caching_enabled()) {
@@ -443,7 +443,7 @@ public:
 // Storing AOT code in the AOT code region (ac) of AOT Cache:
 //
 // [1] Use CachedCodeDirectory to keep track of all of data related to AOT code.
-//     E.g., you can build a hashtable to record what methods have been archived.
+//     E.g., you can build a hash table to record what methods have been archived.
 //
 // [2] Memory for all data for AOT code, including CachedCodeDirectory, should be
 //     allocated using AOTCacheAccess::allocate_aot_code_region().
@@ -460,7 +460,7 @@ public:
 // region is mapped to the process address space. All the pointers in this buffer are relocated as necessary
 // (e.g., to account for the runtime location of the CodeCache).
 //
-// This is always at the very beginning of the mmaped CDS "ac" (AOT code) region
+// This is always at the very beginning of the mmapped CDS "ac" (AOT code) region
 static CachedCodeDirectory* _aot_code_directory = nullptr;
 
 CachedCodeDirectory* CachedCodeDirectory::create() {
@@ -1016,7 +1016,7 @@ void* AOTCodeEntry::operator new(size_t x, AOTCodeCache* cache) {
 static bool check_entry(AOTCodeEntry::Kind kind, uint id, uint comp_level, AOTCodeEntry* entry) {
   if (entry->kind() == kind) {
     assert(entry->id() == id, "sanity");
-    if (kind != AOTCodeEntry::Nmethod || // addapters and stubs have only one version
+    if (kind != AOTCodeEntry::Nmethod || // adapters and stubs have only one version
         // Look only for normal AOT code entry, preload code is handled separately
         (!entry->not_entrant() && (entry->comp_level() == comp_level))) {
       return true; // Found
@@ -3005,7 +3005,7 @@ bool AOTCodeCache::write_oop(oop obj) {
         return false;
       }
     }
-  } else if (java_lang_String::is_instance(obj)) { // herere
+  } else if (java_lang_String::is_instance(obj)) {
     int k = AOTCacheAccess::get_archived_object_permanent_index(obj);  // k >= 0 means obj is a "permanent heap object"
     ResourceMark rm;
     size_t length_sz = 0;
@@ -3050,7 +3050,7 @@ bool AOTCodeCache::write_oop(oop obj) {
     log_debug(aot, codecache, oops)("%d (L%d): Wrote ClassLoader: java_%s_loader",
               compile_id(), comp_level(), (kind == DataKind::SysLoader ? "system" : "platform"));
     return true;
-  } else { // herere
+  } else {
     ResourceMark rm;
     int k = AOTCacheAccess::get_archived_object_permanent_index(obj);  // k >= 0 means obj is a "permanent heap object"
     if (k >= 0) {

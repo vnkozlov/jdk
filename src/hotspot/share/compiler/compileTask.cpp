@@ -191,7 +191,7 @@ void CompileTask::print_post(outputStream* st) {
   bool is_aot = is_aot_load();
   bool is_preload = preload();
   if (is_aot_compile()) {
-    // Tag aot compilation too
+    // Tag AOT compilation too
     is_aot = true;
     is_preload = (compile_reason() == Reason_AOTCompileForPreload);
   }
@@ -332,7 +332,7 @@ void CompileTask::print(outputStream* st, const char* msg, bool short_form, bool
   bool is_aot = is_aot_load();
   bool is_preload = preload();
   if (is_aot_compile()) {
-    // Tag aot compilation too
+    // Tag AOT compilation too
     is_aot = true;
     is_preload = (compile_reason() == Reason_AOTCompileForPreload);
   }

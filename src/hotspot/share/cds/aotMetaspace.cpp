@@ -1580,7 +1580,7 @@ void AOTMetaspace::initialize_runtime_shared_and_meta_spaces() {
   }
 }
 
-// This is called very early at VM start up to get the size of the aot_code region
+// This is called very early at VM start up to get the size of the AOT code region
 void AOTMetaspace::open_static_archive() {
   if (!UseSharedSpaces) {
     return;

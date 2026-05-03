@@ -1473,7 +1473,7 @@ void CompileBroker::preload_aot_method(const methodHandle& method, AOTCodeEntry*
   precond(_initialized);
   precond(aot_code_entry != nullptr && aot_code_entry->for_preload());
   // If the compiler is shut off due to code cache getting full
-  // fail out now so blocking compiles dont hang the java thread
+  // fail out now so blocking compiles don't hang the java thread
   if (should_compile_new_jobs()) {
     int osr_bci = InvocationEntryBci;
     int comp_level = CompLevel_full_optimization;
@@ -2186,7 +2186,7 @@ void CompileBroker::compiler_thread_loop() {
         task->set_failure_reason("breakpoints are present");
       }
 
-      // Don't use AOT compielr threads for dynamic C1 and C2 threads creation.
+      // Don't use AOT compiler threads for dynamic C1 and C2 threads creation.
       if (UseDynamicNumberOfCompilerThreads &&
           (queue == _c1_compile_queue || queue == _c2_compile_queue)) {
         possibly_add_compiler_threads(thread);

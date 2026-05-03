@@ -101,11 +101,11 @@ void CompilationPolicy::maybe_compile_early(const methodHandle& m, MethodTrainin
   CompLevel cur_level = static_cast<CompLevel>(m->highest_comp_level());
   CompLevel next_level = trained_transition(m, cur_level, mtd, THREAD);
   if ((next_level != cur_level || recompile) && can_be_compiled(m, next_level) && !CompileBroker::compilation_is_in_queue(m)) {
-    // We are here becasue some of CTD have all init deps satisifed.
+    // We are here because some of CTD have all init dependencies satisfied.
     CompileTrainingData* ctd = mtd->compile_data_for_aot_code(next_level);
     bool requires_online_compilation = true;
     if (ctd != nullptr) {
-      // Can't load normal AOT code - not all dependancies are ready,
+      // Can't load normal AOT code - not all dependencies are ready,
       // request normal compilation
       requires_online_compilation = (ctd->init_deps_left_acquire() > 0);
     }

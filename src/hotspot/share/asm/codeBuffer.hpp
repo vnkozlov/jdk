@@ -432,7 +432,7 @@ class AsmRemarks {
 
   void share(const AsmRemarks &src);
   void clear();
-  // Clear Collection refence when storing AOT code,
+  // Clear Collection reference when storing AOT code,
   // new one will be created during AOT code load.
   void clear_ref() { _remarks = nullptr; }
   uint print(uint offset, outputStream* strm = tty) const;
@@ -463,7 +463,7 @@ class DbgStrings {
 
   void share(const DbgStrings &src);
   void clear();
-  // Clear Collection refence when storing AOT code,
+  // Clear Collection reference when storing AOT code,
   // new one will be created during AOT code load.
   void clear_ref() { _strings = nullptr; }
 

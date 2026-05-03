@@ -112,7 +112,7 @@ CallGenerator* Compile::call_generator(ciMethod* callee, int vtable_index, bool 
 
   if (AOTCodeCache::is_using_code()) {
     // During production run, when AOT code is used,
-    // C2 compilation could be reguested without collecting
+    // C2 compilation could be requested without collecting
     // profiling. Instead use profiling from training run.
     // Make sure training data is loaded for callee.
     callee->ensure_method_data(true /*training_data_only*/);
